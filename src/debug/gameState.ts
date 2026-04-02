@@ -43,6 +43,8 @@ export type GameDebugState = {
   reward: { x: number; y: number; available: boolean };
   /** Active choice-event type id, or null if none. */
   currentEventId: string | null;
+  /** Active office encounter id when an enemy-tile prompt is open. */
+  currentEncounterId: string | null;
   /** Summary of the most recently resolved event (choice or instant). */
   lastEventResult: string | null;
   /** Last player-facing action result shown in status text. */

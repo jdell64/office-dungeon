@@ -2,7 +2,8 @@ import type { Enemy } from "../entities/Enemy";
 import type { Player } from "../entities/Player";
 
 /**
- * Resolves combat between player and enemy synchronously (mutates both).
+ * Legacy bump-combat resolution (synchronous). Not used for normal enemy tiles
+ * after the office-encounter pivot; kept for possible future boss / special tiles.
  */
 export function resolveCombat(
   player: Player,

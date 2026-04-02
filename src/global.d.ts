@@ -6,6 +6,7 @@ export type OfficeDungeonE2e = {
   restartRun: () => void;
   step: (dx: number, dy: number) => void;
   eventChoice: (yes: boolean) => void;
+  encounterChoice: (choiceIndex: 0 | 1 | 2) => void;
   setStressForTest: (n: number) => void;
   rewardedContinue: () => void;
 };

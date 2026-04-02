@@ -38,6 +38,7 @@ type GameState = {
   }>;
   reward: { x: number; y: number; available: boolean };
   currentEventId: string | null;
+  currentEncounterId?: string | null;
   lastEventResult: string | null;
   events: Array<{
     id: string;
@@ -125,6 +126,7 @@ type OdE2e = {
   restartRun: () => void;
   step: (dx: number, dy: number) => void;
   eventChoice: (yes: boolean) => void;
+  encounterChoice: (choiceIndex: 0 | 1 | 2) => void;
   setStressForTest: (n: number) => void;
   rewardedContinue: () => void;
 };
@@ -146,13 +148,35 @@ async function pressUntilPlayerAt(
   );
 }
 
-/** Original Office (layout 0): path from (0,0) to exit (9,9) without extra moves. */
+/** Original Office (layout 0): path from (0,0) to exit (9,9) along left edge and bottom (avoids top/side walls). */
 async function pacifistReachExitOriginalOffice(page: Page): Promise<void> {
-  for (let x = 1; x <= 9; x++) {
-    await pressUntilPlayerAt(page, "ArrowRight", { x, y: 0 });
-  }
   for (let y = 1; y <= 9; y++) {
-    await pressUntilPlayerAt(page, "ArrowDown", { x: 9, y });
+    await pressUntilPlayerAt(page, "ArrowDown", { x: 0, y });
+  }
+  for (let x = 1; x <= 9; x++) {
+    await pressUntilPlayerAt(page, "ArrowRight", { x, y: 9 });
+  }
+}
+
+/** From (0,0) to Endless Meeting at (4,4) without crossing blocked top row past x=1. */
+async function walkToFirstEnemyOriginalOffice(page: Page): Promise<void> {
+  await pressUntilPlayerAt(page, "ArrowRight", { x: 1, y: 0 });
+  for (let y = 1; y <= 4; y++) {
+    await pressUntilPlayerAt(page, "ArrowDown", { x: 1, y });
+  }
+  for (let x = 2; x <= 4; x++) {
+    await pressUntilPlayerAt(page, "ArrowRight", { x, y: 4 });
+  }
+}
+
+/** From (0,0) to Coworker Venting at (6,2). */
+async function walkToCoworkerEventOriginalOffice(page: Page): Promise<void> {
+  await pressUntilPlayerAt(page, "ArrowRight", { x: 1, y: 0 });
+  for (let y = 1; y <= 2; y++) {
+    await pressUntilPlayerAt(page, "ArrowDown", { x: 1, y });
+  }
+  for (let x = 2; x <= 6; x++) {
+    await pressUntilPlayerAt(page, "ArrowRight", { x, y: 2 });
   }
 }
 
@@ -281,7 +305,7 @@ test("smoke: debug state includes layout; ?layout= pins Executive Row", async ({
   expect(s?.playerEnergy).toBe(8);
 });
 
-test("smoke: move to enemy tile triggers combat (window.__gameState)", async ({
+test("smoke: move to enemy tile opens office encounter (window.__gameState)", async ({
   page,
 }) => {
   await page.goto(OD);
@@ -330,31 +354,38 @@ test("smoke: move to enemy tile triggers combat (window.__gameState)", async ({
     eventsResolved: 0,
   });
 
-  await pressUntilPlayerAt(page, "ArrowRight", { x: 1, y: 0 });
-  await pressUntilPlayerAt(page, "ArrowRight", { x: 2, y: 0 });
-  await pressUntilPlayerAt(page, "ArrowRight", { x: 3, y: 0 });
-  await pressUntilPlayerAt(page, "ArrowRight", { x: 4, y: 0 });
-  await pressUntilPlayerAt(page, "ArrowDown", { x: 4, y: 1 });
-  await pressUntilPlayerAt(page, "ArrowDown", { x: 4, y: 2 });
-  await pressUntilPlayerAt(page, "ArrowDown", { x: 4, y: 3 });
-  await pressUntilPlayerAt(page, "ArrowDown", { x: 4, y: 4 });
+  await walkToFirstEnemyOriginalOffice(page);
+
+  await page.waitForFunction(() => {
+    const s = (window as Window & { __gameState?: GameState }).__gameState;
+    return s?.currentEncounterId === "surprise_meeting";
+  }, { timeout: 5000 });
+
+  await page.keyboard.press("n", { delay: 25 });
+  await page.waitForFunction(() => {
+    const s = (window as Window & { __gameState?: GameState }).__gameState;
+    return (
+      s?.screenState === "running" &&
+      s.runStats.enemiesDefeated === 1 &&
+      s.currentEncounterId == null
+    );
+  }, { timeout: 5000 });
 
   const after = await page.evaluate(() => {
     return (window as Window & { __gameState?: GameState }).__gameState;
   });
   expect(after).toBeDefined();
-  expect(after!.playerPosition).not.toEqual({ x: 0, y: 0 });
   expect(after!.playerPosition).toEqual({ x: 4, y: 4 });
   const e44 = enemyAt(after, 4, 4);
-  expect(
-    !e44?.alive || after!.playerEnergy !== initialRunning!.playerEnergy
-  ).toBe(true);
+  expect(e44?.alive).toBe(false);
+  expect(after!.playerEnergy).toBe(7);
+  expect(after!.playerStress).toBe(1);
   expect(after!.runStats).toEqual({ enemiesDefeated: 1, eventsResolved: 0 });
-  expect(after?.latestMessage).toMatch(/Defeated Endless Meeting/i);
-  await expect(page.getByText(/Energy:\s*6\/8/)).toBeVisible();
+  expect(after?.latestMessage).toMatch(/slipped away|Surprise Meeting/i);
+  await expect(page.locator("#hud-test-mirror")).toContainText(/⚡\s*7\/8/);
 });
 
-test("smoke: reward tile collects after combat and restores energy", async ({
+test("smoke: reward tile collects after encounter and restores energy", async ({
   page,
 }) => {
   await page.goto(OD);
@@ -369,20 +400,23 @@ test("smoke: reward tile collects after combat and restores energy", async ({
   expect(initial!.exit).toEqual({ x: 9, y: 9 });
   expect(initial!.gameWon).toBe(false);
 
-  await pressUntilPlayerAt(page, "ArrowRight", { x: 1, y: 0 });
-  await pressUntilPlayerAt(page, "ArrowRight", { x: 2, y: 0 });
-  await pressUntilPlayerAt(page, "ArrowRight", { x: 3, y: 0 });
-  await pressUntilPlayerAt(page, "ArrowRight", { x: 4, y: 0 });
-  await pressUntilPlayerAt(page, "ArrowDown", { x: 4, y: 1 });
-  await pressUntilPlayerAt(page, "ArrowDown", { x: 4, y: 2 });
-  await pressUntilPlayerAt(page, "ArrowDown", { x: 4, y: 3 });
-  await pressUntilPlayerAt(page, "ArrowDown", { x: 4, y: 4 });
+  await walkToFirstEnemyOriginalOffice(page);
+
+  await page.waitForFunction(() => {
+    const s = (window as Window & { __gameState?: GameState }).__gameState;
+    return s?.currentEncounterId === "surprise_meeting";
+  }, { timeout: 5000 });
+  await page.keyboard.press("n", { delay: 25 });
+  await page.waitForFunction(() => {
+    const s = (window as Window & { __gameState?: GameState }).__gameState;
+    return s?.runStats.enemiesDefeated === 1;
+  }, { timeout: 5000 });
 
   const afterCombat = await page.evaluate(() => {
     return (window as Window & { __gameState?: GameState }).__gameState;
   });
   expect(afterCombat!.playerPosition).toEqual({ x: 4, y: 4 });
-  expect(afterCombat!.playerEnergy).toBe(6);
+  expect(afterCombat!.playerEnergy).toBe(7);
   expect(afterCombat!.reward.available).toBe(true);
 
   await pressUntilPlayerAt(page, "ArrowLeft", { x: 3, y: 4 });
@@ -396,7 +430,7 @@ test("smoke: reward tile collects after combat and restores energy", async ({
   expect(afterReward!.playerPosition).toEqual({ x: 2, y: 2 });
   expect(afterReward!.reward.available).toBe(false);
   expect(afterReward!.playerEnergy).toBe(8);
-  await expect(page.getByText(/Energy:\s*8\/8/)).toBeVisible();
+  await expect(page.locator("#hud-test-mirror")).toContainText(/⚡\s*8\/8/);
 });
 
 test("smoke: exit tile sets gameWon and disables movement", async ({
@@ -413,12 +447,7 @@ test("smoke: exit tile sets gameWon and disables movement", async ({
   expect(initial!.exit).toEqual({ x: 9, y: 9 });
   expect(initial!.gameWon).toBe(false);
 
-  for (let x = 1; x <= 9; x++) {
-    await pressUntilPlayerAt(page, "ArrowRight", { x, y: 0 });
-  }
-  for (let y = 1; y <= 9; y++) {
-    await pressUntilPlayerAt(page, "ArrowDown", { x: 9, y });
-  }
+  await pacifistReachExitOriginalOffice(page);
 
   const won = await page.evaluate(() => {
     return (window as Window & { __gameState?: GameState }).__gameState;
@@ -429,7 +458,7 @@ test("smoke: exit tile sets gameWon and disables movement", async ({
   expect(won!.runStats).toEqual({ enemiesDefeated: 0, eventsResolved: 0 });
   expect(won!.meta.creditsEarnedThisRun).toBe(2);
   expect(won!.meta.officeCredits).toBe(2);
-  await expect(page.getByText(/Status:\s*Victory/)).toBeVisible();
+  await expect(page.locator("#footer-test-mirror")).toContainText(/Victory/);
   await expect(page.getByText(/You made it through the office!/)).toBeVisible();
   await expect(page.getByText(/Result:\s*Victory/)).toBeVisible();
   await expect(page.getByText(/Reward:\s*\+2 Office Credits this run/)).toBeVisible();
@@ -474,12 +503,7 @@ test("smoke: R key restarts run after win and movement works again", async ({
   expect(initial!.gameOver).toBe(false);
   expect(initial!.gameWon).toBe(false);
 
-  for (let x = 1; x <= 9; x++) {
-    await pressUntilPlayerAt(page, "ArrowRight", { x, y: 0 });
-  }
-  for (let y = 1; y <= 9; y++) {
-    await pressUntilPlayerAt(page, "ArrowDown", { x: 9, y });
-  }
+  await pacifistReachExitOriginalOffice(page);
 
   const won = await page.evaluate(() => {
     return (window as Window & { __gameState?: GameState }).__gameState;
@@ -495,7 +519,7 @@ test("smoke: R key restarts run after win and movement works again", async ({
       s != null &&
       s.screenState === "title" &&
       s.layout.index >= 0 &&
-      s.layout.index < 6 &&
+      s.layout.index < 7 &&
       typeof s.layout.id === "string" &&
       s.gameWon === false &&
       s.playerPosition.x === 0 &&
@@ -540,11 +564,7 @@ test("smoke: event tile Coworker Venting — Y blocks movement then adds stress"
   await focusGameAndWaitForState(page);
   await startRun(page);
 
-  for (let x = 1; x <= 6; x++) {
-    await pressUntilPlayerAt(page, "ArrowRight", { x, y: 0 });
-  }
-  await pressUntilPlayerAt(page, "ArrowDown", { x: 6, y: 1 });
-  await pressUntilPlayerAt(page, "ArrowDown", { x: 6, y: 2 });
+  await walkToCoworkerEventOriginalOffice(page);
 
   await page.waitForFunction(() => {
     const s = (window as Window & { __gameState?: GameState }).__gameState;
@@ -556,7 +576,7 @@ test("smoke: event tile Coworker Venting — Y blocks movement then adds stress"
       s.playerPosition.y === 2
     );
   }, { timeout: 5000 });
-  await expect(page.getByText(/Status:\s*Event Active/)).toBeVisible();
+  await expect(page.locator("#footer-test-mirror")).toContainText(/Event/);
 
   const energyDuringEvent = await page.evaluate(() => {
     return (window as Window & { __gameState?: GameState }).__gameState?.playerEnergy;
@@ -588,8 +608,8 @@ test("smoke: event tile Coworker Venting — Y blocks movement then adds stress"
   expect(after!.playerEnergy).toBe(8);
   expect(after!.playerStress).toBe(1);
   expect(after!.runStats).toEqual({ enemiesDefeated: 0, eventsResolved: 1 });
-  await expect(page.getByText(/Stress:\s*1/)).toBeVisible();
-  await expect(page.getByText(/Status:\s*Running/)).toBeVisible();
+  await expect(page.locator("#hud-test-mirror")).toContainText(/~\s*1\/8/);
+  await expect(page.locator("#footer-test-mirror")).toContainText(/Running/);
 });
 
 test("smoke: run summary after game over shows stats and Result Game Over", async ({
@@ -600,16 +620,23 @@ test("smoke: run summary after game over shows stats and Result Game Over", asyn
   await page.locator("#game-root canvas").click();
   await startRun(page);
 
-  for (let x = 1; x <= 4; x++) {
-    await pressUntilPlayerAt(page, "ArrowRight", { x, y: 0 });
-  }
-  for (let y = 1; y <= 4; y++) {
-    await pressUntilPlayerAt(page, "ArrowDown", { x: 4, y });
-  }
+  await walkToFirstEnemyOriginalOffice(page);
+  await page.waitForFunction(() => {
+    const s = (window as Window & { __gameState?: GameState }).__gameState;
+    return s?.currentEncounterId === "surprise_meeting";
+  }, { timeout: 5000 });
+  await page.keyboard.press("y", { delay: 25 });
+  await page.waitForFunction(() => {
+    const s = (window as Window & { __gameState?: GameState }).__gameState;
+    return s?.runStats.enemiesDefeated === 1 && s.playerEnergy === 7;
+  }, { timeout: 5000 });
   await pressUntilPlayerAt(page, "ArrowDown", { x: 4, y: 5 });
   await pressUntilPlayerAt(page, "ArrowLeft", { x: 3, y: 5 });
-  // Passive Aggressive Email at (3,5): with Extra Coffee (8 energy) we still run out
-  // before finishing that fight; game over blocks further moves toward the printer.
+  await page.waitForFunction(() => {
+    const s = (window as Window & { __gameState?: GameState }).__gameState;
+    return s?.currentEncounterId === "reply_all_disaster";
+  }, { timeout: 5000 });
+  await page.keyboard.press("b", { delay: 25 });
   await page.waitForFunction(() => {
     const s = (window as Window & { __gameState?: GameState }).__gameState;
     return s?.gameOver === true && s?.screenState === "gameOver";
@@ -618,9 +645,9 @@ test("smoke: run summary after game over shows stats and Result Game Over", asyn
   const lost = await page.evaluate(() => {
     return (window as Window & { __gameState?: GameState }).__gameState;
   });
-  expect(lost!.runStats).toEqual({ enemiesDefeated: 1, eventsResolved: 0 });
-  expect(lost!.meta.creditsEarnedThisRun).toBe(2);
-  expect(lost!.meta.officeCredits).toBe(2);
+  expect(lost!.runStats).toEqual({ enemiesDefeated: 2, eventsResolved: 0 });
+  expect(lost!.meta.creditsEarnedThisRun).toBe(3);
+  expect(lost!.meta.officeCredits).toBe(3);
   await expect(page.getByText(/Result:\s*Game Over/)).toBeVisible();
   await expect(page.getByText(/Why:\s*You ran out of energy/)).toBeVisible();
   expect(lost!.gameOverReason).toBe("no_energy");
@@ -629,9 +656,9 @@ test("smoke: run summary after game over shows stats and Result Game Over", asyn
   expect(lost!.monetization.continueUsedThisRun).toBe(false);
   await expect(page.getByText(/One more run\?/)).toBeVisible();
   await expect(
-    page.getByText(/3 more credits to unlock Calm Mind/)
+    page.getByText(/2 more credits to unlock Calm Mind/)
   ).toBeVisible();
-  await expect(page.getByText(/Credits earned \(this run\):\s*2/)).toBeVisible();
+  await expect(page.getByText(/Credits earned \(this run\):\s*3/)).toBeVisible();
   await expect(page.getByText(/Continue:\s*available/)).toBeVisible();
   await expect(page.getByText(/Press Enter — Continue \(Ad\)/)).toBeVisible();
   await expect(page.getByText(/Press R or Space to Restart/)).toBeVisible();
@@ -665,11 +692,7 @@ test("smoke: event tile Coworker Venting — N costs energy", async ({ page }) =
   await focusGameAndWaitForState(page);
   await startRun(page);
 
-  for (let x = 1; x <= 6; x++) {
-    await pressUntilPlayerAt(page, "ArrowRight", { x, y: 0 });
-  }
-  await pressUntilPlayerAt(page, "ArrowDown", { x: 6, y: 1 });
-  await pressUntilPlayerAt(page, "ArrowDown", { x: 6, y: 2 });
+  await walkToCoworkerEventOriginalOffice(page);
 
   await page.waitForFunction(() => {
     const s = (window as Window & { __gameState?: GameState }).__gameState;
@@ -845,12 +868,7 @@ test("meta: C on title clears save and resets progression", async ({ page }) => 
   await focusGameAndWaitForState(page);
   await startRun(page);
 
-  for (let x = 1; x <= 9; x++) {
-    await pressUntilPlayerAt(page, "ArrowRight", { x, y: 0 });
-  }
-  for (let y = 1; y <= 9; y++) {
-    await pressUntilPlayerAt(page, "ArrowDown", { x: 9, y });
-  }
+  await pacifistReachExitOriginalOffice(page);
 
   await page.waitForFunction(() => {
     const s = (window as Window & { __gameState?: GameState }).__gameState;
@@ -920,7 +938,7 @@ test("meta: unlock Calm Mind with credits, re-equip Extra Coffee with key 1", as
   }, { timeout: 5000 });
 });
 
-test("meta: Aggressive Reply increases damage (Executive Row combat)", async ({
+test("meta: Aggressive Reply — Executive Row encounter energy outcome", async ({
   page,
 }) => {
   await page.goto("/?eventRandom=0&layout=2");
@@ -985,6 +1003,16 @@ test("meta: Aggressive Reply increases damage (Executive Row combat)", async ({
   for (let y = 1; y <= 4; y++) {
     await pressUntilPlayerAt(page, "ArrowDown", { x: 4, y });
   }
+
+  await page.waitForFunction(() => {
+    const s = (window as Window & { __gameState?: GameState }).__gameState;
+    return s?.currentEncounterId === "it_ticket_swarm";
+  }, { timeout: 5000 });
+  await page.keyboard.press("y", { delay: 25 });
+  await page.waitForFunction(() => {
+    const s = (window as Window & { __gameState?: GameState }).__gameState;
+    return s?.runStats.enemiesDefeated === 1;
+  }, { timeout: 5000 });
 
   const afterCombat = await page.evaluate(() => {
     return (window as Window & { __gameState?: GameState }).__gameState;
@@ -1054,8 +1082,10 @@ test("touch: movement and event choice via __odE2e (no keyboard)", async ({
 
   await page.evaluate(() => {
     const e = (window as Window & { __odE2e?: OdE2e }).__odE2e;
-    for (let i = 0; i < 6; i++) e?.step(1, 0);
-    for (let j = 0; j < 2; j++) e?.step(0, 1);
+    e?.step(1, 0);
+    e?.step(0, 1);
+    e?.step(0, 1);
+    for (let i = 0; i < 5; i++) e?.step(1, 0);
   });
 
   await page.waitForFunction(
@@ -1099,8 +1129,8 @@ test("touch: restart after victory via __odE2e (no keyboard)", async ({
 
   await page.evaluate(() => {
     const e = (window as Window & { __odE2e?: OdE2e }).__odE2e;
-    for (let i = 0; i < 9; i++) e?.step(1, 0);
     for (let j = 0; j < 9; j++) e?.step(0, 1);
+    for (let i = 0; i < 9; i++) e?.step(1, 0);
   });
 
   await page.waitForFunction(
@@ -1173,14 +1203,23 @@ test("smoke: rewarded continue restores run and allows only one use per run", as
   await page.locator("#game-root canvas").click();
   await startRun(page);
 
-  for (let x = 1; x <= 4; x++) {
-    await pressUntilPlayerAt(page, "ArrowRight", { x, y: 0 });
-  }
-  for (let y = 1; y <= 4; y++) {
-    await pressUntilPlayerAt(page, "ArrowDown", { x: 4, y });
-  }
+  await walkToFirstEnemyOriginalOffice(page);
+  await page.waitForFunction(() => {
+    const s = (window as Window & { __gameState?: GameState }).__gameState;
+    return s?.currentEncounterId === "surprise_meeting";
+  }, { timeout: 5000 });
+  await page.keyboard.press("y", { delay: 25 });
+  await page.waitForFunction(() => {
+    const s = (window as Window & { __gameState?: GameState }).__gameState;
+    return s?.runStats.enemiesDefeated === 1;
+  }, { timeout: 5000 });
   await pressUntilPlayerAt(page, "ArrowDown", { x: 4, y: 5 });
   await pressUntilPlayerAt(page, "ArrowLeft", { x: 3, y: 5 });
+  await page.waitForFunction(() => {
+    const s = (window as Window & { __gameState?: GameState }).__gameState;
+    return s?.currentEncounterId === "reply_all_disaster";
+  }, { timeout: 5000 });
+  await page.keyboard.press("b", { delay: 25 });
   await page.waitForFunction(() => {
     const s = (window as Window & { __gameState?: GameState }).__gameState;
     return s?.gameOver === true && s?.screenState === "gameOver";
@@ -1241,14 +1280,23 @@ test("smoke: premium summary shows Continue without Ad label", async ({
   await page.locator("#game-root canvas").click();
   await startRun(page);
 
-  for (let x = 1; x <= 4; x++) {
-    await pressUntilPlayerAt(page, "ArrowRight", { x, y: 0 });
-  }
-  for (let y = 1; y <= 4; y++) {
-    await pressUntilPlayerAt(page, "ArrowDown", { x: 4, y });
-  }
+  await walkToFirstEnemyOriginalOffice(page);
+  await page.waitForFunction(() => {
+    const s = (window as Window & { __gameState?: GameState }).__gameState;
+    return s?.currentEncounterId === "surprise_meeting";
+  }, { timeout: 5000 });
+  await page.keyboard.press("y", { delay: 25 });
+  await page.waitForFunction(() => {
+    const s = (window as Window & { __gameState?: GameState }).__gameState;
+    return s?.runStats.enemiesDefeated === 1;
+  }, { timeout: 5000 });
   await pressUntilPlayerAt(page, "ArrowDown", { x: 4, y: 5 });
   await pressUntilPlayerAt(page, "ArrowLeft", { x: 3, y: 5 });
+  await page.waitForFunction(() => {
+    const s = (window as Window & { __gameState?: GameState }).__gameState;
+    return s?.currentEncounterId === "reply_all_disaster";
+  }, { timeout: 5000 });
+  await page.keyboard.press("b", { delay: 25 });
   await page.waitForFunction(() => {
     const s = (window as Window & { __gameState?: GameState }).__gameState;
     return s?.gameOver === true;

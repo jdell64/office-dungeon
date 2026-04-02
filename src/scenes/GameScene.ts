@@ -1,24 +1,29 @@
 import Phaser from "phaser";
 import {
+  ENCOUNTER_POOL_IDS,
+  getEncounterById,
+  resolveEncounterChoiceWithPerks,
+} from "../data/encounters";
+import {
   EVENT_POOL_IDS,
   getEnemyType,
   getEventType,
   isChoiceEvent,
+  layoutBlockedSet,
   LAYOUTS,
+  warnBlockedTileEntityOverlaps,
   type LayoutDef,
 } from "../data/layouts";
 import { Enemy } from "../entities/Enemy";
 import { Player } from "../entities/Player";
 import { Reward } from "../entities/Reward";
 import { GridSystem } from "../systems/GridSystem";
-import { resolveCombat } from "../systems/CombatSystem";
 import {
   publishGameDebugState,
   type GameDebugState,
   type ScreenState,
 } from "../debug/gameState";
 import {
-  playCombatSfx,
   playEventChoiceSfx,
   playGameOverSfx,
   playHurtSfx,
@@ -58,8 +63,9 @@ import {
   scaledStressGain,
   type Difficulty,
 } from "../game/difficulty";
+import { uiTextStyle } from "../ui/uiText";
 
-const PLAYER_PADDING = 8;
+const PLAYER_PADDING = 7;
 /** Manhattan distance to exit for "So close..." on loss. */
 const NEAR_EXIT_DISTANCE = 2;
 const COLOR_TILE_A = 0x2a2a3e;
@@ -75,7 +81,12 @@ const FLOOR_TINT_EVENT = 0x662266;
 const FLOOR_TINT_REWARD = 0x886622;
 const FLOOR_TINT_EXIT = 0x334488;
 const FLOOR_TINT_ALPHA = 0.18;
+/** Solid fill for non-walkable layout cells. */
+const COLOR_BLOCKED_TILE = 0x2e2820;
+const COLOR_BLOCKED_EDGE = 0x1a1612;
 const STROKE_WIDTH = 3;
+/** Player token reads slightly stronger than enemies. */
+const PLAYER_STROKE_WIDTH = 4;
 const ENTITY_DEPTH = 8;
 const LABEL_DEPTH = 9;
 /** Transient float text above tiles (below HUD). */
@@ -89,24 +100,65 @@ const FLOAT_COLOR_ENERGY_LOSS = "#ff9966";
 const FLOAT_COLOR_ENERGY_GAIN = "#eecc44";
 const FLOAT_COLOR_STRESS = "#dd99ee";
 const FLOAT_COLOR_EVENT = "#cceeff";
+const FLOAT_COLOR_CREDITS = "#ffdd44";
 const HUD_DEPTH = 1000;
 const STATUS_DEPTH = 1001;
 const TITLE_DEPTH = 1002;
-/** Dims the board so title/menu text reads clearly above the grid. */
-const TITLE_BACKDROP_DEPTH = 990;
+/** Above HUD/status so the start screen dims them; below title copy (TITLE_DEPTH). */
+const TITLE_BACKDROP_DEPTH = 1001.5;
 const SUMMARY_DEPTH = 1003;
-const EVENT_PROMPT_DEPTH = 999;
-/** Below HUD so the event body does not cover Energy/Stress/Status */
-const EVENT_PROMPT_Y = 96;
-const EVENT_PROMPT_Y_COMPACT = 84;
+/** Footer encounter/event prompt copy (above phase lines, below board). */
+const FOOTER_PROMPT_DEPTH = 998;
+/** Header strip behind compact HUD. */
+const HUD_BAR_DEPTH = 996;
 const TOUCH_UI_DEPTH = 1100;
 const TOUCH_LABEL_DEPTH = 1101;
 const COMPACT_VIEWPORT_MAX = 520;
-const TOUCH_BTN = 44;
+/** Show D-pad when parent/CSS viewport is narrower than this (desktop hides pad). */
+const TOUCH_MOVEMENT_PARENT_MAX_WIDTH = 700;
+const TOUCH_EDGE_INSET = 16;
+/** D-pad arrow cell size (compact). */
+const TOUCH_PAD_BTN = 36;
+/** Center-to-center spacing between D-pad buttons. */
+const TOUCH_MOVEMENT_GAP = 32;
+/** Event choice + Start / Restart / Continue banner height. */
+const TOUCH_BTN = 40;
 const TOUCH_BANNER_GAP = 8;
-const TOUCH_PAD_GAP = 46;
+/** Fill alpha for touch chrome (readable but not dominant). */
+const TOUCH_FILL_ALPHA = 0.58;
+const TOUCH_STROKE_WIDTH = 1;
+const TOUCH_STROKE_ALPHA = 0.85;
 const COLOR_TOUCH_BG = 0x3a3a55;
-const COLOR_TOUCH_STROKE = 0x8888aa;
+const COLOR_TOUCH_STROKE = 0x6e6e8a;
+
+/**
+ * Screen layout: three vertical zones (header / board / footer).
+ * Header: compact run stats. Board: grid + entities (starts at `boardWorldOffsetY()`).
+ * Footer: prompts, phase + last action, touch controls (see `layoutFooterMessages`).
+ */
+const UI_HEADER_PX = 44;
+/** Reserved height for encounter/event prompt block inside footer (word-wrapped). */
+const FOOTER_PROMPT_RESERVE_PX = 52;
+/** Run phase label (Ready / Running / …). */
+const FOOTER_PHASE_LINE_PX = 15;
+/** Last-action line under phase. */
+const FOOTER_LAST_LINE_PX = 15;
+const FOOTER_STACK_GAP_PX = 4;
+/** Vertical band for D-pad or event choice row (same row; movement hidden during events). */
+const FOOTER_DPAD_ZONE_PX =
+  TOUCH_MOVEMENT_GAP * 2 + TOUCH_PAD_BTN + 12;
+/**
+ * Footer height = prompt + phase + last + gap + controls band.
+ * Must be >= stacked Continue + Restart + padding so banners stay inside the footer.
+ */
+const UI_FOOTER_PX = Math.max(
+  FOOTER_PROMPT_RESERVE_PX +
+    FOOTER_PHASE_LINE_PX +
+    FOOTER_LAST_LINE_PX +
+    FOOTER_STACK_GAP_PX +
+    FOOTER_DPAD_ZONE_PX,
+  12 + TOUCH_BTN * 2 + TOUCH_BANNER_GAP + TOUCH_BTN / 2 + 8
+);
 
 function parseLayoutIndexFromUrl(): number | null {
   const raw = new URLSearchParams(window.location.search).get("layout");
@@ -128,8 +180,18 @@ function parseEventSeedFromUrl(): string | undefined {
   return raw;
 }
 
+/** Deterministic encounter picks for enemies without layout `encounterId` (matches event tile QA URLs). */
+function useDeterministicEnemyEncounters(): boolean {
+  const q = new URLSearchParams(window.location.search);
+  return (
+    q.get("eventRandom") === "0" || q.get("enemyEncounterRandom") === "0"
+  );
+}
+
 export class GameScene extends Phaser.Scene {
   private grid!: GridSystem;
+  /** Current layout's blocked cells (`"x,y"` keys). */
+  private blockedCells = new Set<string>();
   private gridBoardGraphics: Phaser.GameObjects.Graphics | null = null;
   /** When set from `?layout=N`, every new run uses this index. */
   private pinnedLayoutIndexFromUrl: number | null = null;
@@ -144,7 +206,8 @@ export class GameScene extends Phaser.Scene {
   private eventRects: (Phaser.GameObjects.Rectangle | null)[] = [];
   private eventAvailable: boolean[] = [];
   private activeEventIndex: number | null = null;
-  private eventPromptText: Phaser.GameObjects.Text | null = null;
+  /** Multiline prompt in footer (encounter / choice event). */
+  private footerPromptText: Phaser.GameObjects.Text | null = null;
   private playerGridX = 0;
   private playerGridY = 0;
   private cursors!: Phaser.Types.Input.Keyboard.CursorKeys;
@@ -152,6 +215,7 @@ export class GameScene extends Phaser.Scene {
   private keySpace!: Phaser.Input.Keyboard.Key;
   private keyY!: Phaser.Input.Keyboard.Key;
   private keyN!: Phaser.Input.Keyboard.Key;
+  private keyB!: Phaser.Input.Keyboard.Key;
   private keyPerk1!: Phaser.Input.Keyboard.Key;
   private keyPerk2!: Phaser.Input.Keyboard.Key;
   private keyPerk3!: Phaser.Input.Keyboard.Key;
@@ -179,6 +243,8 @@ export class GameScene extends Phaser.Scene {
   private eventsResolved = 0;
   private creditsAwardedForCurrentRun = false;
   private creditsEarnedThisRun = 0;
+  /** Office credits already granted via encounters/pickups this run (end-of-run bonus subtracts this). */
+  private creditsGrantedDuringRun = 0;
   /** Per-run cap for energy (reward/event clamps); may exceed layout max with Extra Coffee. */
   private effectiveMaxEnergy = 5;
   /** Per-run stress ceiling (from layout); at or above = burnout. */
@@ -188,7 +254,11 @@ export class GameScene extends Phaser.Scene {
   private continueUsedThisRun = false;
   private runSummaryBg: Phaser.GameObjects.Graphics | null = null;
   private runSummaryText: Phaser.GameObjects.Text | null = null;
+  private hudBarGraphics: Phaser.GameObjects.Graphics | null = null;
   private hudText!: Phaser.GameObjects.Text;
+  /** Footer: Ready / Running / Event / … */
+  private footerPhaseText: Phaser.GameObjects.Text | null = null;
+  /** Footer: last action (`Last: …` while in a run). */
   private statusText: Phaser.GameObjects.Text | null = null;
   private latestMessageStr = "";
   private playerLabel: Phaser.GameObjects.Text | null = null;
@@ -198,7 +268,11 @@ export class GameScene extends Phaser.Scene {
   private eventLabels: (Phaser.GameObjects.Text | null)[] = [];
   /** Per slot, actual event type for this run (random pool or layout `typeId`). */
   private eventRuntimeTypeIds: string[] = [];
+  /** Per enemy index, encounter id for this run (layout override or pool). */
+  private enemyRuntimeEncounterIds: string[] = [];
   private runEventRng = new Phaser.Math.RandomDataGenerator();
+  /** Enemy index when an office encounter prompt is open (mutually exclusive with activeEventIndex). */
+  private activeEncounterEnemyIndex: number | null = null;
   private lastEventResult: string | null = null;
 
   private touchLayerReady = false;
@@ -231,6 +305,98 @@ export class GameScene extends Phaser.Scene {
 
   private activeLayout(): LayoutDef {
     return LAYOUTS[this.currentLayoutIndex];
+  }
+
+  /** World Y offset where the grid and entities are drawn (below header). */
+  private boardWorldOffsetY(): number {
+    return UI_HEADER_PX;
+  }
+
+  /** Top Y of the footer panel (below board). */
+  private footerTopY(): number {
+    return UI_HEADER_PX + this.grid.rows * this.grid.tileSize;
+  }
+
+  /** Tile center in world space; accounts for header offset. */
+  private boardCellCenter(gridX: number, gridY: number): { x: number; y: number } {
+    const p = this.grid.gridToWorldCenter(gridX, gridY);
+    return { x: p.x, y: p.y + this.boardWorldOffsetY() };
+  }
+
+  /** Vertical center of D-pad / event choice row inside the footer. */
+  private touchControlsCenterY(): number {
+    return (
+      this.footerTopY() +
+      FOOTER_PROMPT_RESERVE_PX +
+      FOOTER_PHASE_LINE_PX +
+      FOOTER_LAST_LINE_PX +
+      FOOTER_STACK_GAP_PX +
+      TOUCH_MOVEMENT_GAP +
+      TOUCH_PAD_BTN / 2
+    );
+  }
+
+  private clearFooterPrompt(): void {
+    this.footerPromptText?.destroy();
+    this.footerPromptText = null;
+  }
+
+  /**
+   * Encounter/event copy in the footer prompt band (keeps the board clean).
+   * Choice labels use on-screen buttons; keyboard Y/N/B remains unchanged in input handling.
+   */
+  private showFooterPrompt(title: string, body: string): void {
+    this.clearFooterPrompt();
+    const wrapW = Math.max(100, this.scale.width - 2 * TOUCH_EDGE_INSET);
+    const lines = [title, "", body].join("\n");
+    this.footerPromptText = this.add.text(
+      TOUCH_EDGE_INSET,
+      this.footerTopY() + 2,
+      lines,
+      uiTextStyle({
+        fontSize: this.isCompactViewport() ? "10px" : "11px",
+        color: "#d8d8ee",
+        wordWrap: { width: wrapW },
+        lineSpacing: 2,
+      })
+    );
+    this.footerPromptText.setOrigin(0, 0);
+    this.footerPromptText.setScrollFactor(0, 0);
+    this.footerPromptText.setDepth(FOOTER_PROMPT_DEPTH);
+  }
+
+  /** Semi-opaque bar behind compact HUD text. */
+  private layoutHeaderBar(): void {
+    const w = this.scale.width;
+    const g = this.hudBarGraphics;
+    if (!g) return;
+    g.clear();
+    g.fillStyle(0x1e1e2e, 0.92);
+    g.fillRect(0, 0, w, UI_HEADER_PX);
+    g.lineStyle(1, 0x3a3a55, 0.9);
+    g.lineBetween(0, UI_HEADER_PX, w, UI_HEADER_PX);
+    this.hudText.setPosition(TOUCH_EDGE_INSET, UI_HEADER_PX / 2);
+    this.hudText.setOrigin(0, 0.5);
+  }
+
+  /** Phase + last-action lines under the prompt band. */
+  private layoutFooterMessages(): void {
+    if (!this.footerPhaseText || !this.statusText) return;
+    const ft = this.footerTopY();
+    const yPhase = ft + FOOTER_PROMPT_RESERVE_PX + 2;
+    const yLast = yPhase + FOOTER_PHASE_LINE_PX;
+    this.footerPhaseText.setPosition(TOUCH_EDGE_INSET, yPhase);
+    this.footerPhaseText.setOrigin(0, 0);
+    this.statusText.setPosition(TOUCH_EDGE_INSET, yLast);
+    this.statusText.setOrigin(0, 0);
+    this.syncFooterTestMirror();
+  }
+
+  /** DOM mirror for Playwright (footer text is not in the canvas DOM). */
+  private syncFooterTestMirror(): void {
+    const el = document.getElementById("footer-test-mirror");
+    if (!el || !this.footerPhaseText || !this.statusText) return;
+    el.textContent = `${this.footerPhaseText.text}\n${this.statusText.text}`;
   }
 
   private pickLayoutIndexForNewRun(): number {
@@ -283,9 +449,22 @@ export class GameScene extends Phaser.Scene {
     const interactionCredits = Math.floor(
       (this.enemiesDefeated + this.eventsResolved) / 2
     );
-    const earned = Math.max(2, interactionCredits + (this.gameWon ? 2 : 0));
-    this.creditsEarnedThisRun = earned;
-    addOfficeCredits(earned);
+    const completionTotal = Math.max(
+      2,
+      interactionCredits + (this.gameWon ? 2 : 0)
+    );
+    const remainder = Math.max(0, completionTotal - this.creditsGrantedDuringRun);
+    if (remainder > 0) {
+      addOfficeCredits(remainder);
+    }
+    this.creditsEarnedThisRun = this.creditsGrantedDuringRun + remainder;
+  }
+
+  /** Immediate meta credits during a run (encounter choices); end-of-run grant is reduced so nothing double-pays. */
+  private grantOfficeCreditsDuringRun(amount: number): void {
+    if (amount <= 0) return;
+    addOfficeCredits(amount);
+    this.creditsGrantedDuringRun += amount;
   }
 
   /**
@@ -333,19 +512,12 @@ export class GameScene extends Phaser.Scene {
     this.bgmMusic.play();
   }
 
-  private formatHudPerkLine(): string | null {
+  /** Short perk name for compact HUD (modifiers stay in meta debug only). */
+  private formatHudPerkShort(): string | null {
     const id = getEquippedPerkId();
     const perk = id ? getPerkById(id) : undefined;
     if (!perk) return null;
-    const m = this.computeActiveRunModifiers();
-    const parts: string[] = [];
-    if (m?.energyDelta) parts.push(`+${m.energyDelta} max energy`);
-    if (m?.stressDelta !== undefined && m.stressDelta !== 0) {
-      parts.push(`${m.stressDelta > 0 ? "+" : ""}${m.stressDelta} start stress`);
-    }
-    if (m?.damageBonus) parts.push(`+${m.damageBonus} damage`);
-    const suffix = parts.length ? ` — ${parts.join(", ")}` : "";
-    return `Perk: ${perk.name}${suffix}`;
+    return perk.name;
   }
 
   private computeActiveRunModifiers():
@@ -362,29 +534,21 @@ export class GameScene extends Phaser.Scene {
   }
 
   private makeTileLabel(x: number, y: number, text: string): Phaser.GameObjects.Text {
-    const fs = this.isCompactViewport() ? "12px" : "11px";
-    const t = this.add.text(x, y, text, {
-      fontSize: fs,
-      color: "#f4f4ff",
-    });
+    const fs = this.isCompactViewport() ? "10px" : "10px";
+    const t = this.add.text(
+      x,
+      y,
+      text,
+      uiTextStyle({
+        fontSize: fs,
+        color: "#f4f4ff",
+      })
+    );
     t.setOrigin(0.5);
     t.setScrollFactor(0, 0);
     t.setDepth(LABEL_DEPTH);
-    t.setStroke("#0a0a14", 4);
+    t.setStroke("#0a0a14", 3);
     return t;
-  }
-
-  private layoutStatusMessage(): void {
-    if (!this.statusText) return;
-    const w = this.scale.width;
-    const h = this.scale.height;
-    const bottomPad = this.isCompactViewport() ? 8 : 12;
-    let inset = 6;
-    if (this.isCompactViewport() && this.computeTouchUiFlags().movement) {
-      inset = bottomPad + TOUCH_PAD_GAP * 2 + TOUCH_BTN + 10;
-    }
-    this.statusText.setPosition(w / 2, h - inset);
-    this.statusText.setOrigin(0.5, 1);
   }
 
   /** Replaces prior message; also stored for `latestMessage` in debug state. */
@@ -399,6 +563,7 @@ export class GameScene extends Phaser.Scene {
             : text;
       this.statusText.setText(display);
     }
+    this.syncFooterTestMirror();
   }
 
   private formatSigned(value: number, label: string): string {
@@ -424,10 +589,15 @@ export class GameScene extends Phaser.Scene {
     yOffsetPx = 0
   ): void {
     const fs = this.isCompactViewport() ? "11px" : "12px";
-    const t = this.add.text(worldX, worldY + yOffsetPx, text, {
-      fontSize: fs,
-      color,
-    });
+    const t = this.add.text(
+      worldX,
+      worldY + yOffsetPx,
+      text,
+      uiTextStyle({
+        fontSize: fs,
+        color,
+      })
+    );
     t.setOrigin(0.5);
     t.setDepth(JUICE_DEPTH);
     t.setStroke("#0a0a14", 3);
@@ -437,8 +607,12 @@ export class GameScene extends Phaser.Scene {
   }
 
   /** Numeric deltas plus `eventJuiceLabels` lines, stacked upward from the player tile. */
-  private spawnEventOutcomeFloaters(dE: number, dS: number): void {
-    const { x, y } = this.grid.gridToWorldCenter(
+  private spawnEventOutcomeFloaters(
+    dE: number,
+    dS: number,
+    dCredits = 0
+  ): void {
+    const { x, y } = this.boardCellCenter(
       this.playerGridX,
       this.playerGridY
     );
@@ -456,6 +630,12 @@ export class GameScene extends Phaser.Scene {
     if (dS !== 0) {
       line(`${dS > 0 ? "+" : ""}${dS} Stress`, FLOAT_COLOR_STRESS);
     }
+    if (dCredits !== 0) {
+      line(
+        `${dCredits > 0 ? "+" : ""}${dCredits} Credits`,
+        FLOAT_COLOR_CREDITS
+      );
+    }
     for (const label of this.eventJuiceLabels(dE, dS)) {
       line(label, FLOAT_COLOR_EVENT);
     }
@@ -465,8 +645,23 @@ export class GameScene extends Phaser.Scene {
     return Math.min(this.scale.width, this.scale.height) <= COMPACT_VIEWPORT_MAX;
   }
 
-  private eventPromptScreenY(): number {
-    return this.isCompactViewport() ? EVENT_PROMPT_Y_COMPACT : EVENT_PROMPT_Y;
+  /** Movement D-pad: narrow browser layout or small game frame (debug flags unchanged). */
+  private showTouchMovementChrome(): boolean {
+    const el = this.game.canvas?.parentElement;
+    const pw =
+      el?.clientWidth ??
+      (typeof window !== "undefined" ? window.innerWidth : 800);
+    return (
+      pw < TOUCH_MOVEMENT_PARENT_MAX_WIDTH || this.isCompactViewport()
+    );
+  }
+
+  private clampMovementPadCenterX(w: number): number {
+    const halfSpan = TOUCH_MOVEMENT_GAP + TOUCH_PAD_BTN / 2;
+    const minCx = TOUCH_EDGE_INSET + halfSpan;
+    const maxCx = w - TOUCH_EDGE_INSET - halfSpan;
+    if (minCx > maxCx) return w / 2;
+    return Phaser.Math.Clamp(w / 2, minCx, maxCx);
   }
 
   private hudFontSizePx(): string {
@@ -483,7 +678,11 @@ export class GameScene extends Phaser.Scene {
     const pw = canvasParent?.clientWidth ?? window.innerWidth ?? 800;
     const ph = canvasParent?.clientHeight ?? window.innerHeight ?? 600;
     const m = Math.min(pw, ph);
-    const maxBoardPx = Math.floor(m * 0.58);
+    /** Keep grid legible when FIT scales a taller canvas (header + footer). */
+    const chromeApprox = UI_HEADER_PX + UI_FOOTER_PX + 28;
+    const maxBoardPx = Math.floor(
+      Math.min(m * 0.58, Math.max(m * 0.42, ph - chromeApprox))
+    );
     const maxTile = Math.floor(
       maxBoardPx / Math.max(layout.grid.cols, layout.grid.rows)
     );
@@ -500,13 +699,20 @@ export class GameScene extends Phaser.Scene {
       movement:
         this.runStarted &&
         this.activeEventIndex === null &&
+        this.activeEncounterEnemyIndex === null &&
         !this.gameOver &&
         !this.gameWon,
-      event: this.activeEventIndex !== null,
+      event:
+        this.activeEventIndex !== null ||
+        this.activeEncounterEnemyIndex !== null,
       start: !this.runStarted,
       restart: this.runStarted && (this.gameOver || this.gameWon),
       continueReward,
     };
+  }
+
+  private isBlockedTile(gridX: number, gridY: number): boolean {
+    return this.blockedCells.has(`${gridX},${gridY}`);
   }
 
   /** One grid step; same rules as arrow keys (caller must gate by game state). */
@@ -515,9 +721,13 @@ export class GameScene extends Phaser.Scene {
     const nx = this.playerGridX + dx;
     const ny = this.playerGridY + dy;
     if (!this.grid.isInBounds(nx, ny)) return;
+    if (this.isBlockedTile(nx, ny)) {
+      this.setStatusMessage("Blocked");
+      return;
+    }
 
     const ts = this.grid.tileSize;
-    const dest = this.grid.gridToWorldCenter(nx, ny);
+    const dest = this.boardCellCenter(nx, ny);
     const flash = this.add.rectangle(
       dest.x,
       dest.y,
@@ -531,7 +741,7 @@ export class GameScene extends Phaser.Scene {
 
     this.playerGridX = nx;
     this.playerGridY = ny;
-    const { x, y } = this.grid.gridToWorldCenter(
+    const { x, y } = this.boardCellCenter(
       this.playerGridX,
       this.playerGridY
     );
@@ -541,7 +751,10 @@ export class GameScene extends Phaser.Scene {
     this.ensureAudioUnlocked();
     playMoveSfx();
 
-    this.tryCombatAtTile(this.playerGridX, this.playerGridY);
+    if (this.tryEncounterAtTile(this.playerGridX, this.playerGridY)) {
+      this.syncDebugState();
+      return;
+    }
     this.tryRewardAtTile(this.playerGridX, this.playerGridY);
     this.tryExitAtTile(this.playerGridX, this.playerGridY);
     this.tryEventAtTile(this.playerGridX, this.playerGridY);
@@ -599,17 +812,32 @@ export class GameScene extends Phaser.Scene {
     letter: string,
     onPress: () => void
   ): void {
-    const half = TOUCH_BTN / 2;
-    const hit = this.add.rectangle(x, y, TOUCH_BTN, TOUCH_BTN, COLOR_TOUCH_BG);
-    hit.setStrokeStyle(2, COLOR_TOUCH_STROKE);
+    const hit = this.add.rectangle(
+      x,
+      y,
+      TOUCH_PAD_BTN,
+      TOUCH_PAD_BTN,
+      COLOR_TOUCH_BG,
+      TOUCH_FILL_ALPHA
+    );
+    hit.setStrokeStyle(
+      TOUCH_STROKE_WIDTH,
+      COLOR_TOUCH_STROKE,
+      TOUCH_STROKE_ALPHA
+    );
     hit.setScrollFactor(0, 0);
     hit.setDepth(TOUCH_UI_DEPTH);
     hit.setInteractive({ useHandCursor: true });
     hit.on("pointerdown", onPress);
-    const lab = this.add.text(x, y, letter, {
-      fontSize: "18px",
-      color: "#e8e8ff",
-    });
+    const lab = this.add.text(
+      x,
+      y,
+      letter,
+      uiTextStyle({
+        fontSize: "15px",
+        color: "#e4e4f2",
+      })
+    );
     lab.setOrigin(0.5);
     lab.setScrollFactor(0, 0);
     lab.setDepth(TOUCH_LABEL_DEPTH);
@@ -626,18 +854,27 @@ export class GameScene extends Phaser.Scene {
   ): void {
     const w = width;
     const h = TOUCH_BTN;
-    const hit = this.add.rectangle(x, y, w, h, COLOR_TOUCH_BG);
-    hit.setStrokeStyle(2, COLOR_TOUCH_STROKE);
+    const hit = this.add.rectangle(x, y, w, h, COLOR_TOUCH_BG, TOUCH_FILL_ALPHA);
+    hit.setStrokeStyle(
+      TOUCH_STROKE_WIDTH,
+      COLOR_TOUCH_STROKE,
+      TOUCH_STROKE_ALPHA
+    );
     hit.setScrollFactor(0, 0);
     hit.setDepth(TOUCH_UI_DEPTH);
     hit.setInteractive({ useHandCursor: true });
     hit.on("pointerdown", onPress);
-    const lab = this.add.text(x, y, initial, {
-      fontSize: "11px",
-      color: "#e8e8ff",
-      align: "center",
-      wordWrap: { width: w - 8 },
-    });
+    const lab = this.add.text(
+      x,
+      y,
+      initial,
+      uiTextStyle({
+        fontSize: "11px",
+        color: "#e4e4f2",
+        align: "center",
+        wordWrap: { width: w - 8 },
+      })
+    );
     lab.setOrigin(0.5);
     lab.setScrollFactor(0, 0);
     lab.setDepth(TOUCH_LABEL_DEPTH);
@@ -653,16 +890,25 @@ export class GameScene extends Phaser.Scene {
     onPress: () => void
   ): { hit: Phaser.GameObjects.Rectangle; text: Phaser.GameObjects.Text } {
     const h = TOUCH_BTN;
-    const hit = this.add.rectangle(x, y, w, h, COLOR_TOUCH_BG);
-    hit.setStrokeStyle(2, COLOR_TOUCH_STROKE);
+    const hit = this.add.rectangle(x, y, w, h, COLOR_TOUCH_BG, TOUCH_FILL_ALPHA);
+    hit.setStrokeStyle(
+      TOUCH_STROKE_WIDTH,
+      COLOR_TOUCH_STROKE,
+      TOUCH_STROKE_ALPHA
+    );
     hit.setScrollFactor(0, 0);
     hit.setDepth(TOUCH_UI_DEPTH);
     hit.setInteractive({ useHandCursor: true });
     hit.on("pointerdown", onPress);
-    const text = this.add.text(x, y, label, {
-      fontSize: "14px",
-      color: "#e8e8ff",
-    });
+    const text = this.add.text(
+      x,
+      y,
+      label,
+      uiTextStyle({
+        fontSize: "14px",
+        color: "#e4e4f2",
+      })
+    );
     text.setOrigin(0.5);
     text.setScrollFactor(0, 0);
     text.setDepth(TOUCH_LABEL_DEPTH);
@@ -673,35 +919,74 @@ export class GameScene extends Phaser.Scene {
     if (this.touchLayerReady) return;
 
     const w = this.scale.width;
-    const h = this.scale.height;
     const bottomPad = this.isCompactViewport() ? 8 : 12;
-    const cx = w - 12 - TOUCH_PAD_GAP;
-    const cy = h - bottomPad - TOUCH_PAD_GAP;
+    const cx = this.clampMovementPadCenterX(w);
+    const cy = this.touchControlsCenterY();
 
-    this.addTouchPadButton(cx, cy - TOUCH_PAD_GAP, "↑", () =>
+    this.addTouchPadButton(cx, cy - TOUCH_MOVEMENT_GAP, "↑", () =>
       this.computeTouchUiFlags().movement ? this.tryStep(0, -1) : undefined
     );
-    this.addTouchPadButton(cx, cy + TOUCH_PAD_GAP, "↓", () =>
+    this.addTouchPadButton(cx, cy + TOUCH_MOVEMENT_GAP, "↓", () =>
       this.computeTouchUiFlags().movement ? this.tryStep(0, 1) : undefined
     );
-    this.addTouchPadButton(cx - TOUCH_PAD_GAP, cy, "←", () =>
+    this.addTouchPadButton(cx - TOUCH_MOVEMENT_GAP, cy, "←", () =>
       this.computeTouchUiFlags().movement ? this.tryStep(-1, 0) : undefined
     );
-    this.addTouchPadButton(cx + TOUCH_PAD_GAP, cy, "→", () =>
+    this.addTouchPadButton(cx + TOUCH_MOVEMENT_GAP, cy, "→", () =>
       this.computeTouchUiFlags().movement ? this.tryStep(1, 0) : undefined
     );
 
-    this.addTouchChoiceButton(48, h - bottomPad - TOUCH_PAD_GAP, "A", () =>
-      this.computeTouchUiFlags().event ? this.resolveEventChoice(true) : undefined
+    const evWCreate = 80;
+    const evGapCreate = 8;
+    this.addTouchChoiceButton(
+      TOUCH_EDGE_INSET + evWCreate / 2,
+      cy,
+      "A",
+      () => {
+        if (!this.computeTouchUiFlags().event) return;
+        if (this.activeEncounterEnemyIndex !== null) {
+          this.resolveActiveEncounterChoice(0);
+        } else {
+          this.resolveEventChoice(true);
+        }
+      }
     );
-    this.addTouchChoiceButton(48 + 80, h - bottomPad - TOUCH_PAD_GAP, "B", () =>
-      this.computeTouchUiFlags().event ? this.resolveEventChoice(false) : undefined
+    this.addTouchChoiceButton(
+      TOUCH_EDGE_INSET + evWCreate + evGapCreate + evWCreate / 2,
+      cy,
+      "B",
+      () => {
+        if (!this.computeTouchUiFlags().event) return;
+        if (this.activeEncounterEnemyIndex !== null) {
+          this.resolveActiveEncounterChoice(1);
+        } else {
+          this.resolveEventChoice(false);
+        }
+      }
+    );
+    this.addTouchChoiceButton(
+      TOUCH_EDGE_INSET +
+        evWCreate * 2 +
+        evGapCreate * 2 +
+        evWCreate / 2,
+      cy,
+      "C",
+      () => {
+        if (!this.computeTouchUiFlags().event) return;
+        if (this.activeEncounterEnemyIndex !== null) {
+          const enc = getEncounterById(
+            this.enemyRuntimeEncounterIds[this.activeEncounterEnemyIndex]!
+          );
+          if (enc.choices.length > 2) this.resolveActiveEncounterChoice(2);
+        }
+      }
     );
 
+    const h = this.scale.height;
     const startPair = this.addTouchBannerButton(
       w / 2,
       h - bottomPad - TOUCH_BTN / 2,
-      Math.min(200, w - 24),
+      Math.min(200, w - 2 * TOUCH_EDGE_INSET),
       "Start",
       () => this.startRunFromTouch()
     );
@@ -710,7 +995,7 @@ export class GameScene extends Phaser.Scene {
 
     const restartY = h - bottomPad - TOUCH_BTN / 2;
     const continueY = restartY - TOUCH_BTN - TOUCH_BANNER_GAP;
-    const bw = Math.min(200, w - 24);
+    const bw = Math.min(200, w - 2 * TOUCH_EDGE_INSET);
 
     const restartPair = this.addTouchBannerButton(
       w / 2,
@@ -748,7 +1033,21 @@ export class GameScene extends Phaser.Scene {
         if (this.computeTouchUiFlags().movement) this.tryStep(dx, dy);
       },
       eventChoice: (yes) => {
-        if (this.computeTouchUiFlags().event) this.resolveEventChoice(yes);
+        if (!this.computeTouchUiFlags().event) return;
+        if (this.activeEncounterEnemyIndex !== null) {
+          this.resolveActiveEncounterChoice(yes ? 0 : 1);
+        } else {
+          this.resolveEventChoice(yes);
+        }
+      },
+      encounterChoice: (choiceIndex: 0 | 1 | 2) => {
+        if (
+          !this.computeTouchUiFlags().event ||
+          this.activeEncounterEnemyIndex === null
+        ) {
+          return;
+        }
+        this.resolveActiveEncounterChoice(choiceIndex);
       },
       /** E2E: set stress then evaluate burnout (must be in an active run). */
       setStressForTest: (n: number) => {
@@ -771,14 +1070,14 @@ export class GameScene extends Phaser.Scene {
     const w = this.scale.width;
     const h = this.scale.height;
     const bottomPad = this.isCompactViewport() ? 8 : 12;
-    const cx = w - 12 - TOUCH_PAD_GAP;
-    const cy = h - bottomPad - TOUCH_PAD_GAP;
+    const cx = this.clampMovementPadCenterX(w);
+    const cy = this.touchControlsCenterY();
 
     const padOrder = [
-      { x: cx, y: cy - TOUCH_PAD_GAP },
-      { x: cx, y: cy + TOUCH_PAD_GAP },
-      { x: cx - TOUCH_PAD_GAP, y: cy },
-      { x: cx + TOUCH_PAD_GAP, y: cy },
+      { x: cx, y: cy - TOUCH_MOVEMENT_GAP },
+      { x: cx, y: cy + TOUCH_MOVEMENT_GAP },
+      { x: cx - TOUCH_MOVEMENT_GAP, y: cy },
+      { x: cx + TOUCH_MOVEMENT_GAP, y: cy },
     ];
     for (let i = 0; i < 4; i++) {
       const pos = padOrder[i]!;
@@ -786,25 +1085,70 @@ export class GameScene extends Phaser.Scene {
       this.touchMoveLabels[i]?.setPosition(pos.x, pos.y);
     }
 
-    const evY = h - bottomPad - TOUCH_PAD_GAP;
-    const evW = this.isCompactViewport()
-      ? Math.min(160, Math.max(72, Math.floor((w - 40) / 2)))
-      : 80;
+    const evY = cy;
+    const usableW = w - 2 * TOUCH_EDGE_INSET;
     const evGap = 8;
-    const leftCx = 24 + evW / 2;
-    const rightCx = 24 + evW + evGap + evW / 2;
+    const threeChoiceEncounter =
+      this.activeEncounterEnemyIndex !== null &&
+      getEncounterById(
+        this.enemyRuntimeEncounterIds[this.activeEncounterEnemyIndex]!
+      ).choices.length > 2;
+    const evW2 = Math.min(
+      160,
+      Math.max(72, Math.floor((usableW - evGap) / 2))
+    );
+    const evW3 = Math.min(
+      100,
+      Math.max(56, Math.floor((usableW - evGap * 2) / 3))
+    );
+    const evW = threeChoiceEncounter ? evW3 : evW2;
+    const leftCx = TOUCH_EDGE_INSET + evW / 2;
+    const midCx = TOUCH_EDGE_INSET + evW + evGap + evW / 2;
+    const rightCx =
+      TOUCH_EDGE_INSET + (evW + evGap) * 2 + evW / 2;
     this.touchEventHits[0]?.setPosition(leftCx, evY);
     this.touchEventHits[0]?.setSize(evW, TOUCH_BTN);
     this.touchEventLabels[0]?.setPosition(leftCx, evY);
-    this.touchEventLabels[0]?.setStyle({ wordWrap: { width: evW - 8 } });
-    this.touchEventHits[1]?.setPosition(rightCx, evY);
-    this.touchEventHits[1]?.setSize(evW, TOUCH_BTN);
-    this.touchEventLabels[1]?.setPosition(rightCx, evY);
-    this.touchEventLabels[1]?.setStyle({ wordWrap: { width: evW - 8 } });
+    this.touchEventLabels[0]?.setStyle(
+      uiTextStyle({ wordWrap: { width: evW - 8 } })
+    );
+    this.touchEventHits[1]?.setPosition(
+      threeChoiceEncounter ? midCx : TOUCH_EDGE_INSET + evW2 + evGap + evW2 / 2,
+      evY
+    );
+    this.touchEventHits[1]?.setSize(
+      threeChoiceEncounter ? evW : evW2,
+      TOUCH_BTN
+    );
+    this.touchEventLabels[1]?.setPosition(
+      threeChoiceEncounter ? midCx : TOUCH_EDGE_INSET + evW2 + evGap + evW2 / 2,
+      evY
+    );
+    this.touchEventLabels[1]?.setStyle(
+      uiTextStyle({
+        wordWrap: { width: (threeChoiceEncounter ? evW : evW2) - 8 },
+      })
+    );
+    if (!threeChoiceEncounter) {
+      this.touchEventHits[0]?.setSize(evW2, TOUCH_BTN);
+      this.touchEventLabels[0]?.setPosition(
+        TOUCH_EDGE_INSET + evW2 / 2,
+        evY
+      );
+      this.touchEventLabels[0]?.setStyle(
+        uiTextStyle({ wordWrap: { width: evW2 - 8 } })
+      );
+    }
+    this.touchEventHits[2]?.setPosition(rightCx, evY);
+    this.touchEventHits[2]?.setSize(evW3, TOUCH_BTN);
+    this.touchEventLabels[2]?.setPosition(rightCx, evY);
+    this.touchEventLabels[2]?.setStyle(
+      uiTextStyle({ wordWrap: { width: evW3 - 8 } })
+    );
 
     const restartY = h - bottomPad - TOUCH_BTN / 2;
     const continueY = restartY - TOUCH_BTN - TOUCH_BANNER_GAP;
-    const bw = Math.min(200, w - 24);
+    const bw = Math.min(200, w - 2 * TOUCH_EDGE_INSET);
     this.touchStartHit?.setPosition(w / 2, restartY);
     this.touchStartLabel?.setPosition(w / 2, restartY);
     this.touchStartHit?.setSize(bw, TOUCH_BTN);
@@ -816,6 +1160,8 @@ export class GameScene extends Phaser.Scene {
     this.touchContinueHit?.setSize(bw, TOUCH_BTN);
 
     const flags = this.computeTouchUiFlags();
+    const moveChrome =
+      flags.movement && this.showTouchMovementChrome();
     const setGroup = (
       show: boolean,
       hits: Phaser.GameObjects.Rectangle[],
@@ -829,8 +1175,34 @@ export class GameScene extends Phaser.Scene {
       for (const t of labels) t.setVisible(show);
     };
 
-    setGroup(flags.movement, this.touchMoveHits, this.touchMoveLabels);
-    setGroup(flags.event, this.touchEventHits, this.touchEventLabels);
+    setGroup(moveChrome, this.touchMoveHits, this.touchMoveLabels);
+
+    if (flags.event) {
+      const showThird = threeChoiceEncounter;
+      for (let i = 0; i < 2; i++) {
+        const hit = this.touchEventHits[i];
+        const lab = this.touchEventLabels[i];
+        if (hit) {
+          hit.setVisible(true);
+          hit.setInteractive({ useHandCursor: true });
+        }
+        if (lab) lab.setVisible(true);
+      }
+      const h2 = this.touchEventHits[2];
+      const l2 = this.touchEventLabels[2];
+      if (h2) {
+        h2.setVisible(showThird);
+        if (showThird) h2.setInteractive({ useHandCursor: true });
+        else h2.disableInteractive();
+      }
+      if (l2) l2.setVisible(showThird);
+    } else {
+      for (const r of this.touchEventHits) {
+        r.setVisible(false);
+        r.disableInteractive();
+      }
+      for (const t of this.touchEventLabels) t.setVisible(false);
+    }
 
     if (this.touchStartHit && this.touchStartLabel) {
       const show = flags.start;
@@ -871,6 +1243,18 @@ export class GameScene extends Phaser.Scene {
           this.touchEventLabels[1]?.setText(et.choiceN.label);
         }
       }
+    } else if (flags.event && this.activeEncounterEnemyIndex !== null) {
+      const eid =
+        this.enemyRuntimeEncounterIds[this.activeEncounterEnemyIndex];
+      if (eid) {
+        const enc = getEncounterById(eid);
+        this.touchEventLabels[0]?.setText(enc.choices[0].label);
+        this.touchEventLabels[1]?.setText(enc.choices[1].label);
+        const third = enc.choices[2];
+        if (third) {
+          this.touchEventLabels[2]?.setText(third.label);
+        }
+      }
     }
 
     const mirror = document.getElementById("touch-ui-test-mirror");
@@ -898,6 +1282,7 @@ export class GameScene extends Phaser.Scene {
     );
     this.keyY = this.input.keyboard!.addKey(Phaser.Input.Keyboard.KeyCodes.Y);
     this.keyN = this.input.keyboard!.addKey(Phaser.Input.Keyboard.KeyCodes.N);
+    this.keyB = this.input.keyboard!.addKey(Phaser.Input.Keyboard.KeyCodes.B);
     this.keyPerk1 = this.input.keyboard!.addKey(Phaser.Input.Keyboard.KeyCodes.ONE);
     this.keyPerk2 = this.input.keyboard!.addKey(Phaser.Input.Keyboard.KeyCodes.TWO);
     this.keyPerk3 = this.input.keyboard!.addKey(Phaser.Input.Keyboard.KeyCodes.THREE);
@@ -937,17 +1322,44 @@ export class GameScene extends Phaser.Scene {
       this.syncDebugState();
     });
 
-    this.hudText = this.add.text(8, 8, "", {
-      fontSize: "14px",
-      color: "#e8e8ff",
-    });
+    const hudBar = this.add.graphics();
+    hudBar.setScrollFactor(0, 0);
+    hudBar.setDepth(HUD_BAR_DEPTH);
+    this.hudBarGraphics = hudBar;
+
+    this.hudText = this.add.text(
+      0,
+      0,
+      "",
+      uiTextStyle({
+        fontSize: "14px",
+        color: "#e8e8ff",
+      })
+    );
     this.hudText.setScrollFactor(0, 0);
     this.hudText.setDepth(HUD_DEPTH);
 
-    this.statusText = this.add.text(0, 0, "", {
-      fontSize: "13px",
-      color: "#c8c8e8",
-    });
+    this.footerPhaseText = this.add.text(
+      0,
+      0,
+      "",
+      uiTextStyle({
+        fontSize: "12px",
+        color: "#a8a8c8",
+      })
+    );
+    this.footerPhaseText.setScrollFactor(0, 0);
+    this.footerPhaseText.setDepth(STATUS_DEPTH);
+
+    this.statusText = this.add.text(
+      0,
+      0,
+      "",
+      uiTextStyle({
+        fontSize: "13px",
+        color: "#c8c8e8",
+      })
+    );
     this.statusText.setScrollFactor(0, 0);
     this.statusText.setDepth(STATUS_DEPTH);
 
@@ -972,7 +1384,8 @@ export class GameScene extends Phaser.Scene {
       tileSize,
     };
     const w = layout.grid.cols * tileSize;
-    const h = layout.grid.rows * tileSize;
+    const gridH = layout.grid.rows * tileSize;
+    const h = UI_HEADER_PX + gridH + UI_FOOTER_PX;
     this.scale.setGameSize(w, h);
     // Phaser's default RESIZE handler only updates the main camera when its size
     // exactly matches the *previous* game size; if that ever fails, the camera
@@ -985,6 +1398,8 @@ export class GameScene extends Phaser.Scene {
     this.gridBoardGraphics?.destroy();
     this.gridBoardGraphics = null;
     this.grid = new GridSystem(gridSpec);
+    this.blockedCells = layoutBlockedSet(layout);
+    warnBlockedTileEntityOverlaps(layout, this.blockedCells);
     this.drawGrid(layout);
 
     this.gameOver = false;
@@ -997,11 +1412,10 @@ export class GameScene extends Phaser.Scene {
     this.eventsResolved = 0;
     this.creditsAwardedForCurrentRun = false;
     this.creditsEarnedThisRun = 0;
+    this.creditsGrantedDuringRun = 0;
     this.activeEventIndex = null;
-    if (this.eventPromptText) {
-      this.eventPromptText.destroy();
-      this.eventPromptText = null;
-    }
+    this.activeEncounterEnemyIndex = null;
+    this.clearFooterPrompt();
     this.playerGridX = layout.player.startGrid.x;
     this.playerGridY = layout.player.startGrid.y;
     const { startEnergy, startStress } = this.computeStartingVitals(layout);
@@ -1020,16 +1434,18 @@ export class GameScene extends Phaser.Scene {
     this.eventAvailable = layout.events.map(() => true);
     this.lastEventResult = null;
     this.assignEventRuntimeTypes(layout);
+    this.assignEnemyEncounterRuntimeIds(layout);
 
     const size = this.grid.tileSize - PLAYER_PADDING;
 
-    const p = this.grid.gridToWorldCenter(this.playerGridX, this.playerGridY);
+    const p = this.boardCellCenter(this.playerGridX, this.playerGridY);
     if (!this.playerRect) {
       this.playerRect = this.add.rectangle(p.x, p.y, size, size, COLOR_PLAYER);
-      this.playerRect.setStrokeStyle(STROKE_WIDTH, 0x118855);
+      this.playerRect.setStrokeStyle(PLAYER_STROKE_WIDTH, 0x66ffcc);
       this.playerRect.setDepth(ENTITY_DEPTH);
     } else {
       this.playerRect.setPosition(p.x, p.y);
+      this.playerRect.setStrokeStyle(PLAYER_STROKE_WIDTH, 0x66ffcc);
       this.playerRect.setVisible(true);
     }
     if (!this.playerLabel) {
@@ -1051,7 +1467,7 @@ export class GameScene extends Phaser.Scene {
     }
     for (let i = 0; i < this.enemies.length; i++) {
       const enemy = this.enemies[i];
-      const eWorld = this.grid.gridToWorldCenter(enemy.gridX, enemy.gridY);
+      const eWorld = this.boardCellCenter(enemy.gridX, enemy.gridY);
       const letter = "E";
       let rect = this.enemyRects[i];
       if (!rect) {
@@ -1062,7 +1478,7 @@ export class GameScene extends Phaser.Scene {
           size,
           enemy.color
         );
-        rect.setStrokeStyle(STROKE_WIDTH, 0xaa2200);
+        rect.setStrokeStyle(4, 0xcc5533);
         rect.setDepth(ENTITY_DEPTH);
         this.enemyRects[i] = rect;
       } else {
@@ -1081,7 +1497,7 @@ export class GameScene extends Phaser.Scene {
       }
     }
 
-    const rWorld = this.grid.gridToWorldCenter(
+    const rWorld = this.boardCellCenter(
       this.reward.gridX,
       this.reward.gridY
     );
@@ -1093,7 +1509,7 @@ export class GameScene extends Phaser.Scene {
         size,
         COLOR_REWARD
       );
-      this.rewardRect.setStrokeStyle(STROKE_WIDTH, 0xcc9900);
+      this.rewardRect.setStrokeStyle(4, 0xeebb33);
       this.rewardRect.setDepth(ENTITY_DEPTH);
     } else {
       this.rewardRect.setPosition(rWorld.x, rWorld.y);
@@ -1106,7 +1522,7 @@ export class GameScene extends Phaser.Scene {
       this.rewardLabel.setVisible(true);
     }
 
-    const exitWorld = this.grid.gridToWorldCenter(
+    const exitWorld = this.boardCellCenter(
       layout.exit.x,
       layout.exit.y
     );
@@ -1118,7 +1534,7 @@ export class GameScene extends Phaser.Scene {
         size,
         COLOR_EXIT
       );
-      this.exitRect.setStrokeStyle(STROKE_WIDTH, 0x3355cc);
+      this.exitRect.setStrokeStyle(4, 0x5588ff);
       this.exitRect.setDepth(ENTITY_DEPTH);
     } else {
       this.exitRect.setPosition(exitWorld.x, exitWorld.y);
@@ -1143,7 +1559,7 @@ export class GameScene extends Phaser.Scene {
     }
     for (let i = 0; i < layout.events.length; i++) {
       const eg = layout.events[i].grid;
-      const eventWorld = this.grid.gridToWorldCenter(eg.x, eg.y);
+      const eventWorld = this.boardCellCenter(eg.x, eg.y);
       let rect = this.eventRects[i];
       if (!rect) {
         rect = this.add.rectangle(
@@ -1153,7 +1569,7 @@ export class GameScene extends Phaser.Scene {
           size,
           COLOR_EVENT
         );
-        rect.setStrokeStyle(STROKE_WIDTH, 0xaa44aa);
+        rect.setStrokeStyle(4, 0xcc77dd);
         rect.setDepth(ENTITY_DEPTH);
         this.eventRects[i] = rect;
       } else {
@@ -1171,7 +1587,7 @@ export class GameScene extends Phaser.Scene {
       }
     }
 
-    this.layoutStatusMessage();
+    this.layoutFooterMessages();
     this.setStatusMessage("");
 
     this.syncDebugState();
@@ -1183,7 +1599,12 @@ export class GameScene extends Phaser.Scene {
 
   private computeScreenState(): ScreenState {
     if (!this.runStarted) return "title";
-    if (this.activeEventIndex !== null) return "event";
+    if (
+      this.activeEventIndex !== null ||
+      this.activeEncounterEnemyIndex !== null
+    ) {
+      return "event";
+    }
     if (this.gameOver) return "gameOver";
     if (this.gameWon) return "victory";
     return "running";
@@ -1293,20 +1714,27 @@ export class GameScene extends Phaser.Scene {
     }
 
     if (!this.runSummaryText) {
-      const t = this.add.text(vw / 2, vh / 2, body, {
-        fontSize: this.isCompactViewport() ? "13px" : "16px",
-        color: "#e8e8ff",
-        align: "center",
-      });
+      const t = this.add.text(
+        vw / 2,
+        vh / 2,
+        body,
+        uiTextStyle({
+          fontSize: this.isCompactViewport() ? "13px" : "16px",
+          color: "#e8e8ff",
+          align: "center",
+        })
+      );
       t.setOrigin(0.5);
       t.setScrollFactor(0, 0);
       t.setDepth(SUMMARY_DEPTH + 1);
       this.runSummaryText = t;
     } else {
       this.runSummaryText.setText(body);
-      this.runSummaryText.setStyle({
-        fontSize: this.isCompactViewport() ? "13px" : "16px",
-      });
+      this.runSummaryText.setStyle(
+        uiTextStyle({
+          fontSize: this.isCompactViewport() ? "13px" : "16px",
+        })
+      );
     }
 
     const mirror = document.getElementById("summary-test-mirror");
@@ -1406,10 +1834,15 @@ export class GameScene extends Phaser.Scene {
       y: y + (compact ? 64 : 72),
     });
     for (const line of lines) {
-      const t = this.add.text(cx, cy + line.y, line.text, {
-        fontSize: line.fontSize,
-        color: "#e8e8ff",
-      });
+      const t = this.add.text(
+        cx,
+        cy + line.y,
+        line.text,
+        uiTextStyle({
+          fontSize: line.fontSize,
+          color: "#e8e8ff",
+        })
+      );
       t.setOrigin(0.5);
       t.setScrollFactor(0, 0);
       t.setDepth(TITLE_DEPTH);
@@ -1450,6 +1883,11 @@ export class GameScene extends Phaser.Scene {
       this.activeEventIndex !== null
         ? (this.eventRuntimeTypeIds[this.activeEventIndex] ?? null)
         : null;
+    const currentEncounterId =
+      this.activeEncounterEnemyIndex !== null
+        ? (this.enemyRuntimeEncounterIds[this.activeEncounterEnemyIndex] ??
+          null)
+        : null;
     const activeEnemy =
       this.enemies.find(
         (e) =>
@@ -1468,6 +1906,7 @@ export class GameScene extends Phaser.Scene {
         name: layout.name,
       },
       currentEventId,
+      currentEncounterId,
       lastEventResult: this.lastEventResult,
       lastActionResult: this.latestMessageStr,
       playerPosition: { x: this.playerGridX, y: this.playerGridY },
@@ -1532,56 +1971,82 @@ export class GameScene extends Phaser.Scene {
     this.updateHud();
     this.syncRunSummaryOverlay();
     this.syncTouchLayer();
-    this.layoutStatusMessage();
+    this.layoutFooterMessages();
+  }
+
+  /** Run phase shown in footer (not in compact HUD). */
+  private footerPhaseLabel(): string {
+    const eventActive =
+      this.activeEventIndex !== null ||
+      this.activeEncounterEnemyIndex !== null;
+    if (!this.runStarted) return "Ready";
+    if (this.gameOver) return "Game Over";
+    if (this.gameWon) return "Victory";
+    if (eventActive) return "Event";
+    return "Running";
+  }
+
+  private footerPhaseFontSizePx(): string {
+    return this.isCompactViewport() ? "11px" : "12px";
   }
 
   private updateHud(): void {
     const layout = this.activeLayout();
-    const eventActive = this.activeEventIndex !== null;
-    const status = !this.runStarted
-      ? "Ready"
-      : this.gameOver
-        ? "Game Over"
-        : this.gameWon
-          ? "Victory"
-          : eventActive
-            ? "Event Active"
-            : "Running";
-    const perkLine = this.formatHudPerkLine();
-    const body = [
-      `Layout: ${layout.name} [${layout.id}]`,
-      `Energy: ${this.player.energy}/${this.effectiveMaxEnergy}`,
-      `Stress: ${this.player.stress}/${this.effectiveMaxStress}`,
-      ...(perkLine ? [perkLine] : []),
-      `Status: ${status}`,
-    ].join("\n");
-    this.hudText.setStyle({ fontSize: this.hudFontSizePx() });
+    const credits = getOfficeCredits();
+    const line1 = `⚡ ${this.player.energy}/${this.effectiveMaxEnergy}   ~ ${this.player.stress}/${this.effectiveMaxStress}   Cr ${credits}`;
+    const perk = this.formatHudPerkShort();
+    const shortLayout =
+      layout.name.length > 16 ? `${layout.name.slice(0, 15)}…` : layout.name;
+    const line2 = perk
+      ? `${shortLayout} · ${perk}`
+      : `${shortLayout} (${layout.id})`;
+    const body = `${line1}\n${line2}`;
+    this.hudText.setStyle(uiTextStyle({ fontSize: this.hudFontSizePx() }));
     this.hudText.setText(body);
+    if (this.footerPhaseText) {
+      this.footerPhaseText.setStyle(
+        uiTextStyle({
+          fontSize: this.footerPhaseFontSizePx(),
+          color: "#a8a8c8",
+        })
+      );
+      this.footerPhaseText.setText(this.footerPhaseLabel());
+    }
     if (this.statusText) {
-      this.statusText.setStyle({ fontSize: this.statusFontSizePx() });
+      this.statusText.setStyle(uiTextStyle({ fontSize: this.statusFontSizePx() }));
     }
     const mirror = document.getElementById("hud-test-mirror");
     if (mirror) mirror.textContent = body;
+    this.layoutHeaderBar();
   }
 
   private drawGrid(layout: LayoutDef): void {
     const g = this.add.graphics();
     this.gridBoardGraphics = g;
     const ts = this.grid.tileSize;
+    const oy = UI_HEADER_PX;
 
     for (let gy = 0; gy < this.grid.rows; gy++) {
       for (let gx = 0; gx < this.grid.cols; gx++) {
         const x = gx * ts;
-        const y = gy * ts;
-        const alt = (gx + gy) % 2 === 0;
-        g.fillStyle(alt ? COLOR_TILE_A : COLOR_TILE_B, 1);
-        g.fillRect(x, y, ts, ts);
+        const y = gy * ts + oy;
+        if (this.isBlockedTile(gx, gy)) {
+          g.fillStyle(COLOR_BLOCKED_TILE, 1);
+          g.fillRect(x, y, ts, ts);
+          g.lineStyle(1, COLOR_BLOCKED_EDGE, 0.9);
+          g.strokeRect(x + 0.5, y + 0.5, ts - 1, ts - 1);
+        } else {
+          const alt = (gx + gy) % 2 === 0;
+          g.fillStyle(alt ? COLOR_TILE_A : COLOR_TILE_B, 1);
+          g.fillRect(x, y, ts, ts);
+        }
       }
     }
 
     const tintCell = (gx: number, gy: number, color: number): void => {
+      if (this.isBlockedTile(gx, gy)) return;
       g.fillStyle(color, FLOOR_TINT_ALPHA);
-      g.fillRect(gx * ts, gy * ts, ts, ts);
+      g.fillRect(gx * ts, gy * ts + oy, ts, ts);
     };
     for (const e of layout.enemies) {
       tintCell(e.grid.x, e.grid.y, FLOOR_TINT_ENEMY);
@@ -1593,61 +2058,99 @@ export class GameScene extends Phaser.Scene {
     tintCell(layout.exit.x, layout.exit.y, FLOOR_TINT_EXIT);
 
     g.lineStyle(1, COLOR_GRID_LINE, 1);
+    const gridPixelH = this.grid.rows * ts;
     for (let i = 0; i <= this.grid.cols; i++) {
       const x = i * ts;
-      g.lineBetween(x, 0, x, this.grid.rows * ts);
+      g.lineBetween(x, oy, x, gridPixelH + oy);
     }
     for (let j = 0; j <= this.grid.rows; j++) {
-      const y = j * ts;
+      const y = j * ts + oy;
       g.lineBetween(0, y, this.grid.cols * ts, y);
     }
+
+    g.fillStyle(0x141422, 1);
+    g.fillRect(0, gridPixelH + oy, this.grid.cols * ts, UI_FOOTER_PX);
+    g.lineStyle(1, 0x2a2a40, 0.95);
+    g.lineBetween(0, gridPixelH + oy, this.grid.cols * ts, gridPixelH + oy);
   }
 
-  private tryCombatAtTile(gridX: number, gridY: number): void {
-    const layout = this.activeLayout();
+  /**
+   * Office encounter on enemy tiles (data-driven). Returns true if a prompt opened
+   * and the caller must skip reward/exit/event on the same step.
+   */
+  private tryEncounterAtTile(gridX: number, gridY: number): boolean {
     const enemy = this.enemies.find(
       (e) => e.hp > 0 && e.gridX === gridX && e.gridY === gridY
     );
-    if (!enemy) return;
+    if (!enemy) return false;
+    if (this.activeEventIndex !== null || this.activeEncounterEnemyIndex !== null) {
+      return false;
+    }
 
     const idx = this.enemies.indexOf(enemy);
-    const playerEnergyBefore = this.player.energy;
-    const playerStressBefore = this.player.stress;
-    const enemyHpBefore = enemy.hp;
-    playCombatSfx();
-    resolveCombat(this.player, enemy, this.playerDamagePerHit(layout));
-    const playerEnergyLost = Math.max(0, playerEnergyBefore - this.player.energy);
-    if (playerEnergyLost > 0) {
+    const eid = this.enemyRuntimeEncounterIds[idx];
+    if (!eid) return false;
+    const enc = getEncounterById(eid);
+
+    this.activeEncounterEnemyIndex = idx;
+    this.setStatusMessage("");
+    this.showFooterPrompt(enc.name, enc.prompt);
+
+    console.log("Encounter opened");
+    this.syncTouchLayer();
+    return true;
+  }
+
+  private resolveActiveEncounterChoice(choiceIndex: number): void {
+    if (this.activeEncounterEnemyIndex === null) return;
+    const idx = this.activeEncounterEnemyIndex;
+    const eid = this.enemyRuntimeEncounterIds[idx];
+    if (!eid) return;
+    const enc = getEncounterById(eid);
+    const raw = enc.choices[choiceIndex];
+    if (!raw) return;
+
+    playEventChoiceSfx();
+    const resolved = resolveEncounterChoiceWithPerks(raw, getEquippedPerkId());
+    const stressDelta = scaledStressGain(
+      resolved.stressDelta,
+      this.selectedDifficulty
+    );
+
+    const energyBefore = this.player.energy;
+    const stressBefore = this.player.stress;
+
+    this.player.energy = Math.max(
+      0,
+      Math.min(
+        this.effectiveMaxEnergy,
+        this.player.energy + resolved.energyDelta
+      )
+    );
+    this.player.stress = Math.max(0, this.player.stress + stressDelta);
+
+    this.grantOfficeCreditsDuringRun(resolved.creditsDelta);
+
+    const dE = this.player.energy - energyBefore;
+    const dS = this.player.stress - stressBefore;
+    const dC = resolved.creditsDelta;
+
+    if (dE < 0) {
       playHurtSfx();
     }
-    const playerStressGained = Math.max(0, this.player.stress - playerStressBefore);
-    const enemyHpLost = Math.max(0, enemyHpBefore - enemy.hp);
 
-    const pCenter = this.grid.gridToWorldCenter(gridX, gridY);
-    if (enemyHpLost > 0) {
-      const eCenter = this.grid.gridToWorldCenter(enemy.gridX, enemy.gridY);
-      this.spawnFloater(eCenter.x, eCenter.y, `-${enemyHpLost} HP`, FLOAT_COLOR_HP_LOSS);
-    }
-    let combatFloaterRow = 0;
-    if (playerEnergyLost > 0) {
-      this.spawnFloater(
-        pCenter.x,
-        pCenter.y,
-        `-${playerEnergyLost} Energy`,
-        FLOAT_COLOR_ENERGY_LOSS,
-        -14 * combatFloaterRow
-      );
-      combatFloaterRow += 1;
-    }
-    if (playerStressGained > 0) {
-      this.spawnFloater(
-        pCenter.x,
-        pCenter.y,
-        `+${playerStressGained} Stress`,
-        FLOAT_COLOR_STRESS,
-        -14 * combatFloaterRow
-      );
-    }
+    this.spawnEventOutcomeFloaters(dE, dS, dC);
+    const pCenter = this.boardCellCenter(
+      this.playerGridX,
+      this.playerGridY
+    );
+    this.spawnFloater(
+      pCenter.x,
+      pCenter.y,
+      "Problem solved",
+      FLOAT_COLOR_EVENT,
+      -14 * (dE !== 0 || dS !== 0 || dC !== 0 ? 3 : 2)
+    );
 
     if (this.playerRect) {
       this.playerRect.setFillStyle(0xff6666);
@@ -1656,51 +2159,50 @@ export class GameScene extends Phaser.Scene {
       );
     }
 
-    const er = this.enemyRects[idx];
-    if (er && enemy.hp > 0) {
-      const ec = enemy.color;
-      er.setFillStyle(0xff4444);
-      this.time.delayedCall(180, () => er.setFillStyle(ec));
+    this.lastEventResult = `${enc.name}: ${resolved.label} (${this.formatSigned(resolved.energyDelta, "Energy")}, ${this.formatSigned(stressDelta, "Stress")}${dC !== 0 ? `, ${this.formatSigned(dC, "Credits")}` : ""})`;
+
+    const enemy = this.enemies[idx]!;
+    enemy.hp = 0;
+    this.enemiesDefeated += 1;
+    this.activeEncounterEnemyIndex = null;
+
+    this.clearFooterPrompt();
+
+    const rect = this.enemyRects[idx];
+    const label = this.enemyLabels[idx];
+    if (rect) {
+      rect.setFillStyle(0xffeedd);
+      this.time.delayedCall(100, () => {
+        rect.destroy();
+        label?.destroy();
+        this.enemyRects[idx] = null;
+        this.enemyLabels[idx] = null;
+      });
     }
 
-    if (enemy.hp <= 0) {
-      this.enemiesDefeated += 1;
-      const rect = this.enemyRects[idx];
-      const label = this.enemyLabels[idx];
-      if (rect) {
-        rect.setFillStyle(0xffeedd);
-        this.time.delayedCall(100, () => {
-          rect.destroy();
-          label?.destroy();
-          this.enemyRects[idx] = null;
-          this.enemyLabels[idx] = null;
-        });
-      }
+    if (resolved.statusMessage) {
+      this.setStatusMessage(resolved.statusMessage);
+    } else if (dE === 0 && dS > 0) {
+      this.setStatusMessage("Stress increased");
+    } else if (dE === 0 && dS < 0) {
+      this.setStatusMessage("Stress decreased");
+    } else if (dE > 0 && dS === 0) {
+      this.setStatusMessage(`Gained ${dE} energy`);
+    } else if (dE < 0 && dS === 0) {
+      this.setStatusMessage(`Lost ${-dE} energy`);
+    } else {
+      this.setStatusMessage(this.lastEventResult);
     }
 
+    console.log("Encounter resolved");
     this.checkRunEndAfterVitals(
-      this.player.energy <= 0 ? `defeated by ${enemy.name}` : undefined
+      this.player.energy <= 0
+        ? `drained by ${enc.name} (${resolved.label})`
+        : undefined
     );
 
-    if (!this.gameOver) {
-      if (enemy.hp <= 0) {
-        this.setStatusMessage(
-          `Defeated ${enemy.name} (enemy -${enemyHpLost} HP` +
-            (playerEnergyLost > 0 ? `, took ${playerEnergyLost} damage` : "") +
-            (playerStressGained > 0 ? `, +${playerStressGained} stress` : "") +
-            ")"
-        );
-      } else {
-        this.setStatusMessage(
-          playerEnergyLost > 0
-            ? `Took ${playerEnergyLost} damage (${enemy.name}, enemy -${enemyHpLost} HP` +
-                (playerStressGained > 0 ? `, +${playerStressGained} stress` : "")
-            : `No damage — ${enemy.name} (enemy -${enemyHpLost} HP` +
-                (playerStressGained > 0 ? `, +${playerStressGained} stress` : "") +
-                ")"
-        );
-      }
-    }
+    this.syncTouchLayer();
+    this.syncDebugState();
   }
 
   private tryRewardAtTile(gridX: number, gridY: number): void {
@@ -1714,7 +2216,7 @@ export class GameScene extends Phaser.Scene {
       this.effectiveMaxEnergy
     );
     const energyGained = this.player.energy - energyBefore;
-    const rewardCenter = this.grid.gridToWorldCenter(gridX, gridY);
+    const rewardCenter = this.boardCellCenter(gridX, gridY);
     if (energyGained > 0) {
       this.spawnFloater(
         rewardCenter.x,
@@ -1783,6 +2285,17 @@ export class GameScene extends Phaser.Scene {
         this.runEventRng.pick(pool)
       );
     }
+  }
+
+  private assignEnemyEncounterRuntimeIds(layout: LayoutDef): void {
+    const pool = [...ENCOUNTER_POOL_IDS];
+    this.enemyRuntimeEncounterIds = layout.enemies.map((pl, i) => {
+      if (pl.encounterId) return pl.encounterId;
+      if (useDeterministicEnemyEncounters()) {
+        return pool[i % pool.length]!;
+      }
+      return this.runEventRng.pick(pool);
+    });
   }
 
   /** 0–1 for instant-event stress chance; tests may override via `window.__odStressRoll`. */
@@ -1862,6 +2375,7 @@ export class GameScene extends Phaser.Scene {
   private tryEventAtTile(gridX: number, gridY: number): void {
     const layout = this.activeLayout();
     if (this.activeEventIndex !== null) return;
+    if (this.activeEncounterEnemyIndex !== null) return;
     for (let i = 0; i < layout.events.length; i++) {
       if (!this.eventAvailable[i]) continue;
       const eg = layout.events[i].grid;
@@ -1878,22 +2392,8 @@ export class GameScene extends Phaser.Scene {
 
       this.activeEventIndex = i;
       console.log("Event triggered");
-      this.setStatusMessage(`Event: ${et.name} (choose Y/N)`);
-      if (this.eventPromptText) {
-        this.eventPromptText.destroy();
-        this.eventPromptText = null;
-      }
-      const wrapW = Math.max(120, this.scale.width - 24);
-      this.eventPromptText = this.add.text(8, this.eventPromptScreenY(), et.prompt, {
-        fontSize: this.isCompactViewport() ? "12px" : "14px",
-        color: "#e8e8ff",
-        backgroundColor: "#1a1a2e",
-        padding: { x: 8, y: 6 },
-        wordWrap: { width: wrapW },
-      });
-      this.eventPromptText.setLineSpacing(3);
-      this.eventPromptText.setScrollFactor(0, 0);
-      this.eventPromptText.setDepth(EVENT_PROMPT_DEPTH);
+      this.setStatusMessage("");
+      this.showFooterPrompt(et.name, et.prompt);
       this.syncDebugState();
       return;
     }
@@ -1944,10 +2444,7 @@ export class GameScene extends Phaser.Scene {
     } else {
       this.setStatusMessage(this.lastEventResult);
     }
-    if (this.eventPromptText) {
-      this.eventPromptText.destroy();
-      this.eventPromptText = null;
-    }
+    this.clearFooterPrompt();
     const er = this.eventRects[idx];
     if (er) {
       er.destroy();
@@ -1959,6 +2456,7 @@ export class GameScene extends Phaser.Scene {
       this.eventLabels[idx] = null;
     }
     this.checkRunEndAfterVitals();
+    this.syncTouchLayer();
     this.syncDebugState();
   }
 
@@ -2022,23 +2520,48 @@ export class GameScene extends Phaser.Scene {
       if (Phaser.Input.Keyboard.JustDown(this.keyPerk1)) {
         const r = tryTitlePerkKey(0);
         if (r === "no_credits") this.setStatusMessage("Not enough credits");
-        this.setupRunEntities(false);
+        // Do not call setupRunEntities here: it runs setGameSize from a fresh
+        // clientWidth/height probe and can jitter ±1px; perk changes only need UI refresh.
+        this.showTitleOverlay();
+        this.syncDebugState();
         return;
       }
       if (Phaser.Input.Keyboard.JustDown(this.keyPerk2)) {
         const r = tryTitlePerkKey(1);
         if (r === "no_credits") this.setStatusMessage("Not enough credits");
-        this.setupRunEntities(false);
+        this.showTitleOverlay();
+        this.syncDebugState();
         return;
       }
       if (Phaser.Input.Keyboard.JustDown(this.keyPerk3)) {
         const r = tryTitlePerkKey(2);
         if (r === "no_credits") this.setStatusMessage("Not enough credits");
-        this.setupRunEntities(false);
+        this.showTitleOverlay();
+        this.syncDebugState();
         return;
       }
       if (Phaser.Input.Keyboard.JustDown(this.keySpace)) {
         this.startRunFromTouch();
+      }
+      return;
+    }
+
+    if (this.activeEncounterEnemyIndex !== null) {
+      const enc = getEncounterById(
+        this.enemyRuntimeEncounterIds[this.activeEncounterEnemyIndex]!
+      );
+      const n = enc.choices.length;
+      if (Phaser.Input.Keyboard.JustDown(this.keyY)) {
+        this.resolveActiveEncounterChoice(0);
+        return;
+      }
+      if (Phaser.Input.Keyboard.JustDown(this.keyN)) {
+        this.resolveActiveEncounterChoice(1);
+        return;
+      }
+      if (n > 2 && Phaser.Input.Keyboard.JustDown(this.keyB)) {
+        this.resolveActiveEncounterChoice(2);
+        return;
       }
       return;
     }

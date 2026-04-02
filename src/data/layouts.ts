@@ -49,6 +49,11 @@ export type LayoutDef = {
   id: string;
   name: string;
   grid: { cols: number; rows: number; tileSize: number };
+  /**
+   * Non-walkable cells (furniture, walls). Omit for an empty floor.
+   * Do not place blocked tiles on player start, exit, reward, enemy, or event cells.
+   */
+  blocked?: ReadonlyArray<{ x: number; y: number }>;
   player: {
     startGrid: { x: number; y: number };
     startEnergy: number;
@@ -58,7 +63,12 @@ export type LayoutDef = {
     /** Stress at or above this value ends the run (burnout). */
     maxStress: number;
   };
-  enemies: ReadonlyArray<{ typeId: string; grid: { x: number; y: number } }>;
+  enemies: ReadonlyArray<{
+    typeId: string;
+    grid: { x: number; y: number };
+    /** If set, this enemy tile uses this encounter; else assigned at run start from pool. */
+    encounterId?: string;
+  }>;
   reward: { grid: { x: number; y: number }; energyRestore: number };
   events: ReadonlyArray<{ typeId: string; grid: { x: number; y: number } }>;
   exit: { x: number; y: number };
@@ -189,9 +199,21 @@ const layoutOriginalOffice: LayoutDef = {
     maxStress: 8,
   },
   enemies: [
-    { typeId: "endless_meeting", grid: { x: 4, y: 4 } },
-    { typeId: "printer_jam", grid: { x: 7, y: 7 } },
-    { typeId: "passive_email", grid: { x: 3, y: 5 } },
+    {
+      typeId: "endless_meeting",
+      grid: { x: 4, y: 4 },
+      encounterId: "surprise_meeting",
+    },
+    {
+      typeId: "printer_jam",
+      grid: { x: 7, y: 7 },
+      encounterId: "broken_printer",
+    },
+    {
+      typeId: "passive_email",
+      grid: { x: 3, y: 5 },
+      encounterId: "reply_all_disaster",
+    },
   ],
   reward: {
     grid: { x: 2, y: 2 },
@@ -203,6 +225,31 @@ const layoutOriginalOffice: LayoutDef = {
     { typeId: "manager_compliment", grid: { x: 8, y: 3 } },
   ],
   exit: { x: 9, y: 9 },
+  /** Top bar, central conference cluster (gap at 6,4), east corridor pinch. */
+  blocked: [
+    { x: 2, y: 0 },
+    { x: 3, y: 0 },
+    { x: 4, y: 0 },
+    { x: 5, y: 0 },
+    { x: 6, y: 0 },
+    { x: 7, y: 0 },
+    { x: 8, y: 0 },
+    { x: 9, y: 0 },
+    { x: 5, y: 3 },
+    { x: 6, y: 3 },
+    { x: 7, y: 3 },
+    { x: 5, y: 4 },
+    { x: 7, y: 4 },
+    { x: 5, y: 5 },
+    { x: 6, y: 5 },
+    { x: 7, y: 5 },
+    { x: 9, y: 1 },
+    { x: 9, y: 2 },
+    { x: 9, y: 3 },
+    { x: 9, y: 4 },
+    { x: 9, y: 5 },
+    { x: 9, y: 6 },
+  ],
 };
 
 /** Different exit, reward, and entity positions (same grid size). */
@@ -233,6 +280,29 @@ const layoutBreakRoomSprint: LayoutDef = {
     { typeId: "manager_compliment", grid: { x: 3, y: 1 } },
   ],
   exit: { x: 8, y: 8 },
+  /** Top bar, east pinch toward exit, cluster south of reward. */
+  blocked: [
+    { x: 2, y: 0 },
+    { x: 3, y: 0 },
+    { x: 4, y: 0 },
+    { x: 5, y: 0 },
+    { x: 6, y: 0 },
+    { x: 7, y: 0 },
+    { x: 8, y: 0 },
+    { x: 9, y: 0 },
+    { x: 9, y: 1 },
+    { x: 9, y: 2 },
+    { x: 9, y: 3 },
+    { x: 9, y: 4 },
+    { x: 9, y: 5 },
+    { x: 9, y: 6 },
+    { x: 9, y: 7 },
+    { x: 4, y: 4 },
+    { x: 3, y: 5 },
+    { x: 5, y: 6 },
+    { x: 6, y: 6 },
+    { x: 7, y: 6 },
+  ],
 };
 
 /** Smaller floor — different bounds and placements. */
@@ -249,7 +319,11 @@ const layoutExecutiveRow: LayoutDef = {
     maxStress: 8,
   },
   enemies: [
-    { typeId: "passive_email", grid: { x: 4, y: 4 } },
+    {
+      typeId: "passive_email",
+      grid: { x: 4, y: 4 },
+      encounterId: "it_ticket_swarm",
+    },
     { typeId: "printer_jam", grid: { x: 6, y: 2 } },
   ],
   reward: {
@@ -355,6 +429,25 @@ const layoutRiskReward: LayoutDef = {
     { typeId: "coworker_venting", grid: { x: 8, y: 8 } },
   ],
   exit: { x: 9, y: 9 },
+  /** East strip forces west approach to exit; central desk island. */
+  blocked: [
+    { x: 9, y: 0 },
+    { x: 9, y: 1 },
+    { x: 9, y: 2 },
+    { x: 9, y: 3 },
+    { x: 9, y: 4 },
+    { x: 9, y: 5 },
+    { x: 9, y: 6 },
+    { x: 4, y: 4 },
+    { x: 5, y: 4 },
+    { x: 6, y: 4 },
+    { x: 4, y: 5 },
+    { x: 5, y: 5 },
+    { x: 6, y: 5 },
+    { x: 4, y: 6 },
+    { x: 5, y: 6 },
+    { x: 6, y: 6 },
+  ],
 };
 
 /** Exit on the top row — rim route or interior detour for reward and events. */
@@ -396,6 +489,43 @@ export const LAYOUTS: readonly LayoutDef[] = [
   layoutRiskReward,
   layoutTopRowSprint,
 ] as const;
+
+/** Key for blocked-tile sets and lookups. */
+export function layoutCellKey(x: number, y: number): string {
+  return `${x},${y}`;
+}
+
+export function layoutBlockedSet(layout: LayoutDef): Set<string> {
+  const s = new Set<string>();
+  for (const c of layout.blocked ?? []) {
+    s.add(layoutCellKey(c.x, c.y));
+  }
+  return s;
+}
+
+/** Logs a warning when a blocked cell overlaps special tiles (dev / authoring aid). */
+export function warnBlockedTileEntityOverlaps(
+  layout: LayoutDef,
+  blocked: Set<string>
+): void {
+  const check = (x: number, y: number, label: string): void => {
+    if (blocked.has(layoutCellKey(x, y))) {
+      console.warn(
+        `[Office Dungeon] Layout "${layout.id}": blocked tile overlaps ${label} at (${x},${y})`
+      );
+    }
+  };
+  const p = layout.player.startGrid;
+  check(p.x, p.y, "player start");
+  check(layout.exit.x, layout.exit.y, "exit");
+  check(layout.reward.grid.x, layout.reward.grid.y, "reward");
+  for (const e of layout.enemies) {
+    check(e.grid.x, e.grid.y, `enemy (${e.typeId})`);
+  }
+  for (const ev of layout.events) {
+    check(ev.grid.x, ev.grid.y, `event (${ev.typeId})`);
+  }
+}
 
 const enemyTypeById = new Map(enemyTypes.map((t) => [t.id, t] as const));
 const eventTypeById = new Map(eventTypes.map((t) => [t.id, t] as const));

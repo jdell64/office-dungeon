@@ -6,6 +6,12 @@
       name="viewport"
       content="width=device-width, initial-scale=1.0, viewport-fit=cover"
     />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;600&display=swap"
+      rel="stylesheet"
+    />
     <title>Office Dungeon</title>
     <style>
       html,
@@ -24,6 +30,19 @@
     <!-- Mirrors Phaser HUD text for e2e (canvas text is not in the DOM). -->
     <div
       id="hud-test-mirror"
+      aria-hidden="true"
+      style="
+        position: absolute;
+        left: -9999px;
+        width: 1px;
+        height: 1px;
+        overflow: hidden;
+        white-space: pre-wrap;
+      "
+    ></div>
+    <!-- Footer phase + last-action lines for e2e (Phaser footer is canvas-only). -->
+    <div
+      id="footer-test-mirror"
       aria-hidden="true"
       style="
         position: absolute;
