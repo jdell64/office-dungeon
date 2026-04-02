@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, viewport-fit=cover"
+    />
+    <title>Office Dungeon</title>
+    <style>
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        background: #111;
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        min-height: 100vh;
+      }
+    </style>
+  </head>
+  <body>
+    <!-- Mirrors Phaser HUD text for e2e (canvas text is not in the DOM). -->
+    <div
+      id="hud-test-mirror"
+      aria-hidden="true"
+      style="
+        position: absolute;
+        left: -9999px;
+        width: 1px;
+        height: 1px;
+        overflow: hidden;
+        white-space: pre-wrap;
+      "
+    ></div>
+    <div
+      id="summary-test-mirror"
+      aria-hidden="true"
+      style="
+        position: absolute;
+        left: -9999px;
+        width: 1px;
+        height: 1px;
+        overflow: hidden;
+        white-space: pre-wrap;
+      "
+    ></div>
+    <div
+      id="touch-ui-test-mirror"
+      aria-hidden="true"
+      style="
+        position: absolute;
+        left: -9999px;
+        width: 1px;
+        height: 1px;
+        overflow: hidden;
+        white-space: pre-wrap;
+      "
+    ></div>
+    <div id="game-root" tabindex="0"></div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

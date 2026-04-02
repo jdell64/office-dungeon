@@ -1,0 +1,15 @@
+{
+  "appName": "Office Dungeon",
+  "shortTagline": "Survive the corporate dungeon—one choice at a time.",
+  "appId": "com.example.officedungeon",
+  "version": "0.0.1",
+  "descriptionShort": "A bite-sized roguelike set in the worst office ever. Make calls, manage stress, and see how far your career run goes.",
+  "descriptionLong": "Office Dungeon is a draft store description—replace before release.\n\nYou descend floor by floor through absurd workplace hazards, events, and choices. Each run mixes light strategy with narrative prompts. Meta progression and optional premium-style hooks are planned; tune this copy to match the final game and monetization model.\n\nThis text is intentionally placeholder: expand with concrete features, tone, and compliance text as you approach launch.",
+  "promoTagline": "Your quarterly review is a boss fight.",
+  "keyFeatures": [
+    "Short sessions, replayable runs",
+    "Event-driven choices with consequences",
+    "Meta progression between runs",
+    "Touch-friendly; built for mobile and web"
+  ]
+}

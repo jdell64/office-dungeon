@@ -1,0 +1,79 @@
+---
+alwaysApply: true
+---
+# Project: Office Dungeon (Phaser + TypeScript)
+
+## Core Principles
+
+- Keep the implementation SIMPLE and ITERATIVE.
+- Do NOT add features that are not explicitly requested.
+- Prefer small, testable steps over large systems.
+- Avoid premature abstraction.
+
+## Tech Stack
+
+- Phaser 3
+- TypeScript
+- Vite (or simple dev server)
+- No backend
+- No external state libraries
+
+## Architecture Rules
+
+- Use a simple folder structure:
+  - /scenes
+  - /entities
+  - /systems
+  - /data
+
+- Each system should have ONE responsibility:
+  - GridSystem → grid + movement
+  - CombatSystem → combat resolution
+  - EventSystem → events
+
+- Avoid inheritance-heavy designs.
+- Prefer plain classes and simple functions.
+
+## Game Design Constraints (MVP)
+
+- Grid-based movement only (no physics engine)
+- Turn-based gameplay
+- One player
+- One enemy type initially
+- No animations required
+- No UI frameworks
+
+## Code Constraints
+
+- All logic must be readable and explicit
+- No magic numbers — use constants
+- Keep functions small
+- Avoid async unless necessary
+
+## Output Expectations
+
+When generating code:
+- Create complete files, not fragments
+- Include imports
+- Ensure code compiles
+- Do not assume hidden context
+
+## Anti-Goals (DO NOT DO)
+
+- Do NOT implement:
+  - inventory systems
+  - save systems
+  - complex AI
+  - networking
+  - animations beyond placeholders
+
+- Do NOT refactor unrelated files
+
+## Iteration Strategy
+
+Always:
+1. Implement the smallest working version
+2. Verify it runs
+3. Then extend
+
+Never jump ahead.

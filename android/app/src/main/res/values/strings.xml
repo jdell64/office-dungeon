@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">Office Dungeon</string>
+    <string name="title_activity_main">Office Dungeon</string>
+    <string name="package_name">com.example.officedungeon</string>
+    <string name="custom_url_scheme">com.example.officedungeon</string>
+</resources>

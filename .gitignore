@@ -1,0 +1,33 @@
+# Dependencies
+node_modules/
+
+# Web build (Vite → production bundle; regenerate with npm run build)
+dist/
+
+# TypeScript incremental build info
+*.tsbuildinfo
+
+# Vite cache (local, not source)
+.vite/
+
+# Test / coverage outputs
+coverage/
+test-results/
+playwright-report/
+blob-report/
+playwright/.cache/
+
+# Local env / secrets
+*.local
+
+# Android (Capacitor) — Gradle & generated binaries
+android/app/build/
+android/build/
+android/.gradle/
+android/local.properties
+*.keystore
+!debug.keystore
+
+# OS / editor
+.DS_Store
+Thumbs.db
