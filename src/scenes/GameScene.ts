@@ -126,6 +126,8 @@ const SUMMARY_DEPTH = 1003;
 const FOOTER_PROMPT_DEPTH = 998;
 /** Header strip behind compact HUD. */
 const HUD_BAR_DEPTH = 996;
+/** Space between energy battery graphic and the rest of the HUD line. */
+const ENERGY_BATTERY_GAP = 6;
 const TOUCH_UI_DEPTH = 1100;
 const TOUCH_LABEL_DEPTH = 1101;
 const COMPACT_VIEWPORT_MAX = 520;
@@ -293,6 +295,7 @@ export class GameScene extends Phaser.Scene {
   private runSummaryBg: Phaser.GameObjects.Graphics | null = null;
   private runSummaryText: Phaser.GameObjects.Text | null = null;
   private hudBarGraphics: Phaser.GameObjects.Graphics | null = null;
+  private energyBatteryGraphics: Phaser.GameObjects.Graphics | null = null;
   private hudText!: Phaser.GameObjects.Text;
   /** Footer: Ready / Running / Event / … */
   private footerPhaseText: Phaser.GameObjects.Text | null = null;
@@ -425,8 +428,67 @@ export class GameScene extends Phaser.Scene {
     g.fillRect(0, 0, w, UI_HEADER_PX);
     g.lineStyle(1, 0x3a3a55, 0.9);
     g.lineBetween(0, UI_HEADER_PX, w, UI_HEADER_PX);
-    this.hudText.setPosition(TOUCH_EDGE_INSET, UI_HEADER_PX / 2);
+    const hudX = TOUCH_EDGE_INSET + this.energyBatteryHudOffsetX();
+    this.hudText.setPosition(hudX, UI_HEADER_PX / 2);
     this.hudText.setOrigin(0, 0.5);
+  }
+
+  private energyBatteryMetrics(): {
+    bodyW: number;
+    bodyH: number;
+    nibW: number;
+    nibH: number;
+    cornerR: number;
+    pad: number;
+  } {
+    return this.isCompactViewport()
+      ? { bodyW: 26, bodyH: 12, nibW: 2, nibH: 6, cornerR: 2, pad: 2 }
+      : { bodyW: 30, bodyH: 14, nibW: 3, nibH: 8, cornerR: 2, pad: 2 };
+  }
+
+  /** Horizontal space reserved left of HUD text for the battery + gap. */
+  private energyBatteryHudOffsetX(): number {
+    const m = this.energyBatteryMetrics();
+    return m.bodyW + m.nibW + ENERGY_BATTERY_GAP;
+  }
+
+  private drawEnergyBattery(): void {
+    const g = this.energyBatteryGraphics;
+    if (!g) return;
+    g.clear();
+    const m = this.energyBatteryMetrics();
+    const maxE = Math.max(1, this.effectiveMaxEnergy);
+    const e = Phaser.Math.Clamp(this.player.energy, 0, maxE);
+    const ratio = e / maxE;
+
+    const cx = TOUCH_EDGE_INSET;
+    const cy = UI_HEADER_PX / 2;
+    const bodyX = cx;
+    const bodyY = cy - m.bodyH / 2;
+
+    const nibX = bodyX + m.bodyW;
+    const nibY = cy - m.nibH / 2;
+    g.fillStyle(0x4a4a68, 1);
+    g.fillRoundedRect(nibX, nibY, m.nibW, m.nibH, 1);
+
+    g.lineStyle(2, 0x8a9aac, 1);
+    g.strokeRoundedRect(bodyX, bodyY, m.bodyW, m.bodyH, m.cornerR);
+
+    const innerX = bodyX + m.pad;
+    const innerY = bodyY + m.pad;
+    const innerW = m.bodyW - m.pad * 2;
+    const innerH = m.bodyH - m.pad * 2;
+    g.fillStyle(0x161622, 1);
+    g.fillRoundedRect(innerX, innerY, innerW, innerH, 1);
+
+    const fillW = innerW * ratio;
+    if (ratio > 0) {
+      const drawW = Math.min(innerW, Math.max(1, fillW));
+      const fillColor =
+        ratio > 0.5 ? 0x44dd99 : ratio > 0.25 ? 0xeebb44 : 0xff6655;
+      g.fillStyle(fillColor, 1);
+      g.fillRect(innerX, innerY, drawW, innerH);
+    }
   }
 
   /** Phase + last-action lines under the prompt band. */
@@ -1656,6 +1718,11 @@ export class GameScene extends Phaser.Scene {
     this.hudText.setScrollFactor(0, 0);
     this.hudText.setDepth(HUD_DEPTH);
 
+    const energyBat = this.add.graphics();
+    energyBat.setScrollFactor(0, 0);
+    energyBat.setDepth(HUD_DEPTH - 1);
+    this.energyBatteryGraphics = energyBat;
+
     this.footerPhaseText = this.add.text(
       0,
       0,
@@ -2424,7 +2491,9 @@ export class GameScene extends Phaser.Scene {
   private updateHud(): void {
     const layout = this.activeLayout();
     const credits = getOfficeCredits();
-    const line1 = `⚡ ${this.player.energy}/${this.effectiveMaxEnergy}   🤯 ${this.player.stress}/${this.effectiveMaxStress}   💰 ${credits}   💼 ${this.workDone}/${this.workTarget}`;
+    const statsTail = `🤯 ${this.player.stress}/${this.effectiveMaxStress}   💰 ${credits}   💼 ${this.workDone}/${this.workTarget}`;
+    const line1Mirror = `⚡ ${this.player.energy}/${this.effectiveMaxEnergy}   ${statsTail}`;
+    const line1Display = statsTail;
     const relicHud = this.formatHudRelicsShort();
     const shortName =
       layout.name.length > 16 ? `${layout.name.slice(0, 15)}…` : layout.name;
@@ -2434,7 +2503,8 @@ export class GameScene extends Phaser.Scene {
     const line2 = relicHud
       ? `${shortLayout} · ${relicHud}`
       : `${shortLayout} (${layout.id})`;
-    const body = `${line1}\n${line2}`;
+    const body = `${line1Display}\n${line2}`;
+    this.drawEnergyBattery();
     this.hudText.setStyle(uiTextStyle({ fontSize: this.hudFontSizePx() }));
     this.hudText.setText(body);
     if (this.footerPhaseText) {
@@ -2450,7 +2520,7 @@ export class GameScene extends Phaser.Scene {
       this.statusText.setStyle(uiTextStyle({ fontSize: this.statusFontSizePx() }));
     }
     const mirror = document.getElementById("hud-test-mirror");
-    if (mirror) mirror.textContent = body;
+    if (mirror) mirror.textContent = `${line1Mirror}\n${line2}`;
     this.layoutHeaderBar();
   }
 
