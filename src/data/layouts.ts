@@ -16,6 +16,7 @@ export type EventChoiceDef = {
   label: string;
   energyDelta: number;
   stressDelta: number;
+  workDelta: number;
 };
 
 export type EventChoiceTypeDef = {
@@ -36,6 +37,7 @@ export type EventInstantTypeDef = {
   /** 0–1 probability of applying stressDeltaIfRoll after energyDelta */
   stressChance: number;
   stressDeltaIfRoll: number;
+  workDelta: number;
 };
 
 export type EventTypeDef = EventChoiceTypeDef | EventInstantTypeDef;
@@ -48,6 +50,8 @@ export type LayoutDef = {
   /** Stable slug for debug / saves (not tied to array order). */
   id: string;
   name: string;
+  /** Optional emoji prefix in compact HUD (canonical `name` stays plain for debug/tests). */
+  hudIcon?: string;
   grid: { cols: number; rows: number; tileSize: number };
   /**
    * Non-walkable cells (furniture, walls). Omit for an empty floor.
@@ -69,7 +73,15 @@ export type LayoutDef = {
     /** If set, this enemy tile uses this encounter; else assigned at run start from pool. */
     encounterId?: string;
   }>;
-  reward: { grid: { x: number; y: number }; energyRestore: number };
+  /**
+   * Pick up tile: either `workRestore` (>0) grants work only, or `energyRestore`
+   * (default path) restores energy.
+   */
+  reward: {
+    grid: { x: number; y: number };
+    energyRestore?: number;
+    workRestore?: number;
+  };
   events: ReadonlyArray<{ typeId: string; grid: { x: number; y: number } }>;
   exit: { x: number; y: number };
 };
@@ -111,10 +123,19 @@ export const eventTypes: readonly EventTypeDef[] = [
     kind: "choice",
     id: "coworker_venting",
     name: "Coworker Venting",
-    prompt:
-      "Coworker Venting\nA coworker starts venting to you in the hallway.\n[Y] Listen (+1 stress)  [N] Escape (-1 energy)",
-    choiceY: { label: "Listen", energyDelta: 0, stressDelta: 1 },
-    choiceN: { label: "Escape", energyDelta: -1, stressDelta: 0 },
+    prompt: "Coworker Venting\nA coworker starts venting to you in the hallway.",
+    choiceY: {
+      label: "Listen",
+      energyDelta: 0,
+      stressDelta: 1,
+      workDelta: 8,
+    },
+    choiceN: {
+      label: "Escape",
+      energyDelta: -1,
+      stressDelta: 0,
+      workDelta: 4,
+    },
   },
   {
     kind: "instant",
@@ -125,70 +146,140 @@ export const eventTypes: readonly EventTypeDef[] = [
     energyDelta: 1,
     stressChance: 0.15,
     stressDeltaIfRoll: 1,
+    workDelta: 5,
   },
   {
     kind: "choice",
     id: "manager_compliment",
     name: "Manager Compliment",
     prompt:
-      "Manager Compliment\nYour manager praises you in front of the team.\n[Y] Thank them (-1 stress)  [N] Deflect awkwardly (+1 stress)",
-    choiceY: { label: "Thank them", energyDelta: 0, stressDelta: -1 },
-    choiceN: { label: "Deflect", energyDelta: 0, stressDelta: 1 },
+      "Manager Compliment\nYour manager praises you in front of the team.",
+    choiceY: {
+      label: "Thank them",
+      energyDelta: 0,
+      stressDelta: -1,
+      workDelta: 4,
+    },
+    choiceN: {
+      label: "Deflect",
+      energyDelta: 0,
+      stressDelta: 1,
+      workDelta: 8,
+    },
   },
   {
     kind: "choice",
     id: "coffee_spill",
     name: "Coffee Spill",
     prompt:
-      "Coffee Spill\nSomeone bumps you and hot coffee sloshes toward your shirt.\n[Y] Jump back (-1 energy)  [N] Take the hit (+1 stress)",
-    choiceY: { label: "Jump back", energyDelta: -1, stressDelta: 0 },
-    choiceN: { label: "Take the hit", energyDelta: 0, stressDelta: 1 },
+      "Coffee Spill\nSomeone bumps you and hot coffee sloshes toward your shirt.",
+    choiceY: {
+      label: "Jump back",
+      energyDelta: -1,
+      stressDelta: 0,
+      workDelta: 4,
+    },
+    choiceN: {
+      label: "Take the hit",
+      energyDelta: 0,
+      stressDelta: 1,
+      workDelta: 8,
+    },
   },
   {
     kind: "choice",
     id: "manager_checkin",
     name: "Manager Check-in",
-    prompt:
-      "Manager Check-in\nYour manager corners you for a quick sync.\n[Y] Keep it brief (-1 stress)  [N] Impress them (+1 energy, +1 stress)",
-    choiceY: { label: "Keep it brief", energyDelta: 0, stressDelta: -1 },
-    choiceN: { label: "Impress them", energyDelta: 1, stressDelta: 1 },
+    prompt: "Manager Check-in\nYour manager corners you for a quick sync.",
+    choiceY: {
+      label: "Keep it brief",
+      energyDelta: 0,
+      stressDelta: -1,
+      workDelta: 4,
+    },
+    choiceN: {
+      label: "Impress them",
+      energyDelta: 1,
+      stressDelta: 1,
+      workDelta: 8,
+    },
   },
   {
     kind: "choice",
     id: "copier_jam",
     name: "Printer Jam",
     prompt:
-      "Printer Jam\nThe copier ate your report right before the deadline.\n[Y] Clear it (-1 energy)  [N] Walk away (+1 stress)",
-    choiceY: { label: "Clear it", energyDelta: -1, stressDelta: 0 },
-    choiceN: { label: "Walk away", energyDelta: 0, stressDelta: 1 },
+      "Printer Jam\nThe copier ate your report right before the deadline.",
+    choiceY: {
+      label: "Clear it",
+      energyDelta: -1,
+      stressDelta: 0,
+      workDelta: 4,
+    },
+    choiceN: {
+      label: "Walk away",
+      energyDelta: 0,
+      stressDelta: 1,
+      workDelta: 8,
+    },
   },
   {
     kind: "choice",
     id: "last_minute_invite",
     name: "Last-Minute Invite",
     prompt:
-      "Last-Minute Invite\nYou're pinged to join a \"quick\" sync in five minutes.\n[Y] Decline politely (-1 energy)  [N] Join and dread it (+1 stress)",
-    choiceY: { label: "Decline politely", energyDelta: -1, stressDelta: 0 },
-    choiceN: { label: "Join", energyDelta: 0, stressDelta: 1 },
+      "Last-Minute Invite\nYou're pinged to join a \"quick\" sync in five minutes.",
+    choiceY: {
+      label: "Decline politely",
+      energyDelta: -1,
+      stressDelta: 0,
+      workDelta: 4,
+    },
+    choiceN: {
+      label: "Join",
+      energyDelta: 0,
+      stressDelta: 1,
+      workDelta: 8,
+    },
   },
   {
     kind: "choice",
     id: "desk_audit",
     name: "Desk Neatness Check",
     prompt:
-      "Desk Neatness Check\nFacilities is doing walkthrough photos today.\n[Y] Tidy in a hurry (-1 energy)  [N] Leave it messy (+1 stress)",
-    choiceY: { label: "Tidy up", energyDelta: -1, stressDelta: 0 },
-    choiceN: { label: "Leave it", energyDelta: 0, stressDelta: 1 },
+      "Desk Neatness Check\nFacilities is doing walkthrough photos today.",
+    choiceY: {
+      label: "Tidy up",
+      energyDelta: -1,
+      stressDelta: 0,
+      workDelta: 4,
+    },
+    choiceN: {
+      label: "Leave it",
+      energyDelta: 0,
+      stressDelta: 1,
+      workDelta: 8,
+    },
   },
 ] as const;
 
 /** Ids eligible for random assignment on event tiles (all defined events). */
 export const EVENT_POOL_IDS: readonly string[] = eventTypes.map((t) => t.id);
 
+/**
+ * Reusable topology ideas for future proc-gen (hand maps below use these shapes):
+ * - Reception top-bar (row 0) leaving a 1–2 tile lobby lane from spawn
+ * - East-edge service strip forcing westward approach to the far column
+ * - Hollow or C-shaped desk cluster with a single-file or 2-wide choke
+ * - Split path: risky dense band vs longer safe corridor
+ * - Break-room pocket: 3 walls + one entrance off a side hall
+ */
+
 /** Layout 0 — identical to former single levelConfig. */
 const layoutOriginalOffice: LayoutDef = {
   id: "original_office",
   name: "Original Office",
+  hudIcon: "🏢",
   grid: { cols: 10, rows: 10, tileSize: 64 },
   player: {
     startGrid: { x: 0, y: 0 },
@@ -256,6 +347,7 @@ const layoutOriginalOffice: LayoutDef = {
 const layoutBreakRoomSprint: LayoutDef = {
   id: "break_room_sprint",
   name: "Break Room Sprint",
+  hudIcon: "🏃",
   grid: { cols: 10, rows: 10, tileSize: 64 },
   player: {
     startGrid: { x: 0, y: 0 },
@@ -309,6 +401,7 @@ const layoutBreakRoomSprint: LayoutDef = {
 const layoutExecutiveRow: LayoutDef = {
   id: "executive_row",
   name: "Executive Row",
+  hudIcon: "🎩",
   grid: { cols: 8, rows: 8, tileSize: 64 },
   player: {
     startGrid: { x: 0, y: 0 },
@@ -328,7 +421,7 @@ const layoutExecutiveRow: LayoutDef = {
   ],
   reward: {
     grid: { x: 1, y: 1 },
-    energyRestore: 3,
+    workRestore: 8,
   },
   events: [
     { typeId: "manager_compliment", grid: { x: 5, y: 5 } },
@@ -341,6 +434,7 @@ const layoutExecutiveRow: LayoutDef = {
 const layoutCombatHeavy: LayoutDef = {
   id: "combat_heavy",
   name: "Combat Heavy",
+  hudIcon: "⚔️",
   grid: { cols: 10, rows: 10, tileSize: 64 },
   player: {
     startGrid: { x: 0, y: 0 },
@@ -351,25 +445,62 @@ const layoutCombatHeavy: LayoutDef = {
     maxStress: 8,
   },
   enemies: [
-    { typeId: "endless_meeting", grid: { x: 2, y: 2 } },
-    { typeId: "printer_jam", grid: { x: 5, y: 2 } },
-    { typeId: "passive_email", grid: { x: 8, y: 2 } },
-    { typeId: "printer_jam", grid: { x: 3, y: 5 } },
-    { typeId: "endless_meeting", grid: { x: 6, y: 6 } },
-    { typeId: "passive_email", grid: { x: 8, y: 7 } },
+    { typeId: "endless_meeting", grid: { x: 4, y: 2 } },
+    { typeId: "printer_jam", grid: { x: 7, y: 2 } },
+    { typeId: "passive_email", grid: { x: 1, y: 6 } },
+    { typeId: "printer_jam", grid: { x: 6, y: 5 } },
+    { typeId: "endless_meeting", grid: { x: 3, y: 6 } },
+    { typeId: "passive_email", grid: { x: 8, y: 8 } },
   ],
   reward: {
-    grid: { x: 4, y: 4 },
+    grid: { x: 3, y: 8 },
     energyRestore: 3,
   },
-  events: [{ typeId: "free_snacks", grid: { x: 1, y: 8 } }],
+  events: [{ typeId: "free_snacks", grid: { x: 4, y: 1 } }],
   exit: { x: 9, y: 9 },
+  /**
+   * Top lobby bar, west bench row, east service strip, central desk choke (gap 6,5),
+   * south pinch + reward alcove (enter from 3,7).
+   */
+  blocked: [
+    { x: 2, y: 0 },
+    { x: 3, y: 0 },
+    { x: 4, y: 0 },
+    { x: 5, y: 0 },
+    { x: 6, y: 0 },
+    { x: 7, y: 0 },
+    { x: 8, y: 0 },
+    { x: 9, y: 0 },
+    { x: 0, y: 3 },
+    { x: 1, y: 3 },
+    { x: 2, y: 3 },
+    { x: 9, y: 1 },
+    { x: 9, y: 2 },
+    { x: 9, y: 3 },
+    { x: 9, y: 4 },
+    { x: 9, y: 5 },
+    { x: 5, y: 4 },
+    { x: 6, y: 4 },
+    { x: 7, y: 4 },
+    { x: 5, y: 5 },
+    { x: 7, y: 5 },
+    { x: 4, y: 6 },
+    { x: 5, y: 6 },
+    { x: 6, y: 6 },
+    { x: 7, y: 6 },
+    { x: 1, y: 7 },
+    { x: 2, y: 7 },
+    { x: 2, y: 8 },
+    { x: 4, y: 8 },
+    { x: 3, y: 9 },
+  ],
 };
 
 /** Light combat, many events. */
 const layoutEventHeavy: LayoutDef = {
   id: "event_heavy",
   name: "Event Heavy",
+  hudIcon: "🎭",
   grid: { cols: 10, rows: 10, tileSize: 64 },
   player: {
     startGrid: { x: 0, y: 0 },
@@ -380,21 +511,56 @@ const layoutEventHeavy: LayoutDef = {
     maxStress: 8,
   },
   enemies: [
-    { typeId: "printer_jam", grid: { x: 7, y: 7 } },
-    { typeId: "endless_meeting", grid: { x: 8, y: 1 } },
+    { typeId: "printer_jam", grid: { x: 8, y: 7 } },
+    { typeId: "endless_meeting", grid: { x: 8, y: 2 } },
   ],
   reward: {
     grid: { x: 2, y: 2 },
     energyRestore: 3,
   },
-  events: [
-    { typeId: "coworker_venting", grid: { x: 3, y: 1 } },
-    { typeId: "manager_compliment", grid: { x: 1, y: 4 } },
-    { typeId: "coffee_spill", grid: { x: 5, y: 3 } },
-    { typeId: "manager_checkin", grid: { x: 2, y: 6 } },
-    { typeId: "copier_jam", grid: { x: 6, y: 5 } },
-  ],
   exit: { x: 9, y: 9 },
+  /**
+   * Top bar + east strip; hollow conference (walk through 5,5); west break pocket
+   * with free_snacks optional via (3,8); main hall carries coworker on row 2.
+   */
+  blocked: [
+    { x: 2, y: 0 },
+    { x: 3, y: 0 },
+    { x: 4, y: 0 },
+    { x: 5, y: 0 },
+    { x: 6, y: 0 },
+    { x: 7, y: 0 },
+    { x: 8, y: 0 },
+    { x: 9, y: 0 },
+    { x: 9, y: 1 },
+    { x: 9, y: 2 },
+    { x: 9, y: 3 },
+    { x: 9, y: 4 },
+    { x: 9, y: 5 },
+    { x: 9, y: 6 },
+    { x: 4, y: 4 },
+    { x: 5, y: 4 },
+    { x: 6, y: 4 },
+    { x: 4, y: 5 },
+    { x: 6, y: 5 },
+    { x: 4, y: 6 },
+    { x: 5, y: 6 },
+    { x: 6, y: 6 },
+    { x: 0, y: 7 },
+    { x: 1, y: 7 },
+    { x: 2, y: 7 },
+    { x: 2, y: 8 },
+    { x: 4, y: 8 },
+    { x: 3, y: 9 },
+  ],
+  events: [
+    { typeId: "coworker_venting", grid: { x: 6, y: 2 } },
+    { typeId: "manager_compliment", grid: { x: 8, y: 4 } },
+    { typeId: "coffee_spill", grid: { x: 5, y: 7 } },
+    { typeId: "manager_checkin", grid: { x: 3, y: 5 } },
+    { typeId: "copier_jam", grid: { x: 7, y: 6 } },
+    { typeId: "free_snacks", grid: { x: 3, y: 8 } },
+  ],
 };
 
 /**
@@ -403,6 +569,7 @@ const layoutEventHeavy: LayoutDef = {
 const layoutRiskReward: LayoutDef = {
   id: "risk_reward",
   name: "Risk / Reward",
+  hudIcon: "⚖️",
   grid: { cols: 10, rows: 10, tileSize: 64 },
   player: {
     startGrid: { x: 0, y: 0 },
@@ -425,12 +592,18 @@ const layoutRiskReward: LayoutDef = {
     energyRestore: 3,
   },
   events: [
-    { typeId: "free_snacks", grid: { x: 3, y: 7 } },
-    { typeId: "coworker_venting", grid: { x: 8, y: 8 } },
+    { typeId: "free_snacks", grid: { x: 8, y: 5 } },
+    { typeId: "coworker_venting", grid: { x: 5, y: 7 } },
   ],
   exit: { x: 9, y: 9 },
-  /** East strip forces west approach to exit; central desk island. */
+  /**
+   * East strip + central island; top filler (6–8,0) tightens the risky band;
+   * coworker on the south approach to the island, snacks on the east column detour.
+   */
   blocked: [
+    { x: 6, y: 0 },
+    { x: 7, y: 0 },
+    { x: 8, y: 0 },
     { x: 9, y: 0 },
     { x: 9, y: 1 },
     { x: 9, y: 2 },
@@ -454,6 +627,7 @@ const layoutRiskReward: LayoutDef = {
 const layoutTopRowSprint: LayoutDef = {
   id: "top_row_sprint",
   name: "Top Row Sprint",
+  hudIcon: "⬆️",
   grid: { cols: 10, rows: 10, tileSize: 64 },
   player: {
     startGrid: { x: 0, y: 0 },
@@ -467,17 +641,47 @@ const layoutTopRowSprint: LayoutDef = {
     { typeId: "slack_ping_storm", grid: { x: 3, y: 0 } },
     { typeId: "printer_jam", grid: { x: 6, y: 4 } },
     { typeId: "endless_meeting", grid: { x: 8, y: 7 } },
+    /** Only approach to exit is (9,1)→(9,0); guarantees combat work toward target 32. */
+    { typeId: "printer_jam", grid: { x: 9, y: 1 } },
   ],
   reward: {
     grid: { x: 5, y: 5 },
     energyRestore: 3,
   },
   events: [
-    { typeId: "last_minute_invite", grid: { x: 1, y: 7 } },
-    { typeId: "desk_audit", grid: { x: 7, y: 1 } },
-    { typeId: "free_snacks", grid: { x: 4, y: 8 } },
+    { typeId: "last_minute_invite", grid: { x: 4, y: 7 } },
+    { typeId: "desk_audit", grid: { x: 1, y: 2 } },
+    { typeId: "free_snacks", grid: { x: 2, y: 8 } },
   ],
   exit: { x: 9, y: 0 },
+  /**
+   * Mid top wall forces dip south before the exit column; west row blocks, interior
+   * cubicles, east spine; reward sits in the inner room; snacks in SW pocket.
+   */
+  blocked: [
+    { x: 4, y: 0 },
+    { x: 5, y: 0 },
+    { x: 6, y: 0 },
+    { x: 7, y: 0 },
+    { x: 8, y: 0 },
+    { x: 0, y: 4 },
+    { x: 1, y: 4 },
+    { x: 2, y: 4 },
+    { x: 3, y: 4 },
+    { x: 6, y: 2 },
+    { x: 7, y: 2 },
+    { x: 8, y: 2 },
+    { x: 2, y: 6 },
+    { x: 3, y: 6 },
+    { x: 4, y: 6 },
+    { x: 5, y: 6 },
+    { x: 8, y: 4 },
+    { x: 8, y: 5 },
+    { x: 8, y: 6 },
+    { x: 5, y: 8 },
+    { x: 6, y: 8 },
+    { x: 7, y: 8 },
+  ],
 };
 
 export const LAYOUTS: readonly LayoutDef[] = [
@@ -501,6 +705,57 @@ export function layoutBlockedSet(layout: LayoutDef): Set<string> {
     s.add(layoutCellKey(c.x, c.y));
   }
   return s;
+}
+
+/** True if some orthogonal path exists from player start to exit (blocked cells impassable). */
+export function isExitReachable(
+  layout: LayoutDef,
+  blocked: Set<string>
+): boolean {
+  const { cols, rows } = layout.grid;
+  const sx = layout.player.startGrid.x;
+  const sy = layout.player.startGrid.y;
+  const ex = layout.exit.x;
+  const ey = layout.exit.y;
+  const walkable = (x: number, y: number): boolean =>
+    x >= 0 &&
+    x < cols &&
+    y >= 0 &&
+    y < rows &&
+    !blocked.has(layoutCellKey(x, y));
+  if (!walkable(sx, sy) || !walkable(ex, ey)) return false;
+  const seen = new Set<string>();
+  const q: Array<[number, number]> = [[sx, sy]];
+  seen.add(layoutCellKey(sx, sy));
+  while (q.length > 0) {
+    const [x, y] = q.shift()!;
+    if (x === ex && y === ey) return true;
+    const next: Array<[number, number]> = [
+      [x + 1, y],
+      [x - 1, y],
+      [x, y + 1],
+      [x, y - 1],
+    ];
+    for (const [nx, ny] of next) {
+      const k = layoutCellKey(nx, ny);
+      if (walkable(nx, ny) && !seen.has(k)) {
+        seen.add(k);
+        q.push([nx, ny]);
+      }
+    }
+  }
+  return false;
+}
+
+export function warnIfExitUnreachable(
+  layout: LayoutDef,
+  blocked: Set<string>
+): void {
+  if (!isExitReachable(layout, blocked)) {
+    console.warn(
+      `[Office Dungeon] Layout "${layout.id}": exit is not reachable from player start (blocked topology).`
+    );
+  }
 }
 
 /** Logs a warning when a blocked cell overlaps special tiles (dev / authoring aid). */

@@ -20,7 +20,19 @@ export function difficultyLabel(d: Difficulty): string {
   }
 }
 
-/** Added to starting energy and effective max energy after layout + perks. */
+/** Compact cue for HUD / title (pairs with `difficultyLabel`). */
+export function difficultyHudIcon(d: Difficulty): string {
+  switch (d) {
+    case "easy":
+      return "🌿";
+    case "normal":
+      return "📋";
+    case "hard":
+      return "🔥";
+  }
+}
+
+/** Added to starting energy and effective max energy after layout + relics. */
 export function energyBonus(d: Difficulty): number {
   switch (d) {
     case "easy":

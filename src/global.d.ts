@@ -8,6 +8,8 @@ export type OfficeDungeonE2e = {
   eventChoice: (yes: boolean) => void;
   encounterChoice: (choiceIndex: 0 | 1 | 2) => void;
   setStressForTest: (n: number) => void;
+  /** E2E: set energy while in an active run (`uncapped` bypasses max for long movement tests). */
+  setEnergyForTest: (n: number, uncapped?: boolean) => void;
   rewardedContinue: () => void;
 };
 

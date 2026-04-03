@@ -2,7 +2,7 @@ import Phaser from "phaser";
 import {
   ENCOUNTER_POOL_IDS,
   getEncounterById,
-  resolveEncounterChoiceWithPerks,
+  type ResolvedEncounterChoice,
 } from "../data/encounters";
 import {
   EVENT_POOL_IDS,
@@ -12,6 +12,8 @@ import {
   layoutBlockedSet,
   LAYOUTS,
   warnBlockedTileEntityOverlaps,
+  warnIfExitUnreachable,
+  type EventChoiceDef,
   type LayoutDef,
 } from "../data/layouts";
 import { Enemy } from "../entities/Enemy";
@@ -33,18 +35,32 @@ import {
   setAudioScene,
   setSessionAudioMute,
 } from "../audio/soundHooks";
-import { getPerkById, PERKS } from "../meta/perks";
+import {
+  MAX_RELIC_SLOTS,
+  RELIC_SLOT_UNLOCK_RULES,
+  RELICS,
+  aggregatedDamageBonus,
+  aggregatedStartEnergyBonus,
+  aggregatedStartStressReduction,
+  countRelicEffects,
+  getRelicById,
+  resolveEncounterChoiceWithRelics,
+} from "../meta/relics";
 import {
   clearMetaState,
   wasMetaLoadedFromStorage,
 } from "../meta/metaStorage";
 import {
   addOfficeCredits,
-  getEquippedPerkId,
-  getNextPerkUnlockTease,
+  clearRelicSlot,
+  getEquippedRelicIds,
+  getEquippedRelicSlots,
+  getNextRelicUnlockTease,
   getOfficeCredits,
-  getUnlockedPerkIds,
-  tryTitlePerkKey,
+  getRelicSlotCount,
+  getUnlockedRelicIds,
+  tryAssignRelicToSlot,
+  tryUnlockNextRelicSlot,
 } from "../meta/sessionMeta";
 import {
   getPremiumNoAdsEnabled,
@@ -57,6 +73,7 @@ import {
 } from "../meta/sessionStats";
 import {
   cycleDifficulty,
+  difficultyHudIcon,
   difficultyLabel,
   energyBonus,
   scaledEnemyDamage,
@@ -68,6 +85,10 @@ import { uiTextStyle } from "../ui/uiText";
 const PLAYER_PADDING = 7;
 /** Manhattan distance to exit for "So close..." on loss. */
 const NEAR_EXIT_DISTANCE = 2;
+/** Fixed run goal for work progress (phase 2 core loop). */
+const RUN_WORK_TARGET = 32;
+/** Work granted when an office encounter removes an enemy (not per choice). */
+const WORK_PER_ENEMY_DEFEAT = 6;
 const COLOR_TILE_A = 0x2a2a3e;
 const COLOR_TILE_B = 0x242438;
 const COLOR_GRID_LINE = 0x444466;
@@ -94,7 +115,8 @@ const JUICE_DEPTH = 10;
 /** Brief destination-tile highlight under entities. */
 const TILE_FLASH_DEPTH = 7;
 const TILE_FLASH_MS = 200;
-const FLOATER_LIFETIME_MS = 220;
+/** Floating "+1 Energy" / event juice text; keep on screen long enough to read. */
+const FLOATER_LIFETIME_MS = 1300;
 const FLOAT_COLOR_HP_LOSS = "#ff8888";
 const FLOAT_COLOR_ENERGY_LOSS = "#ff9966";
 const FLOAT_COLOR_ENERGY_GAIN = "#eecc44";
@@ -119,11 +141,22 @@ const TOUCH_MOVEMENT_PARENT_MAX_WIDTH = 700;
 const TOUCH_EDGE_INSET = 16;
 /** D-pad arrow cell size (compact). */
 const TOUCH_PAD_BTN = 36;
-/** Center-to-center spacing between D-pad buttons. */
-const TOUCH_MOVEMENT_GAP = 32;
+/**
+ * Center-to-center offset from D-pad middle to each arrow (horizontal/vertical).
+ * Must be ≥ `TOUCH_PAD_BTN` so adjacent cells do not overlap (stroke is drawn on the rect edge).
+ */
+const TOUCH_MOVEMENT_GAP = 40;
 /** Event choice + Start / Restart / Continue banner height. */
 const TOUCH_BTN = 40;
 const TOUCH_BANNER_GAP = 8;
+/** Encounter/event choice tiles: min height, max height, font auto-fit range. */
+const TOUCH_CHOICE_MIN_H = 52;
+const TOUCH_CHOICE_MAX_H = 102;
+const TOUCH_CHOICE_FONT_MAX_PX = 11;
+const TOUCH_CHOICE_FONT_MIN_PX = 8;
+const TOUCH_CHOICE_PAD_Y = 10;
+/** Gap between status line and top of choice / movement band. */
+const FOOTER_ABOVE_CHOICE_GAP_PX = 8;
 /** Fill alpha for touch chrome (readable but not dominant). */
 const TOUCH_FILL_ALPHA = 0.58;
 const TOUCH_STROKE_WIDTH = 1;
@@ -137,21 +170,29 @@ const COLOR_TOUCH_STROKE = 0x6e6e8a;
  * Footer: prompts, phase + last action, touch controls (see `layoutFooterMessages`).
  */
 const UI_HEADER_PX = 44;
-/** Reserved height for encounter/event prompt block inside footer (word-wrapped). */
-const FOOTER_PROMPT_RESERVE_PX = 52;
+/** Minimum reserved height for encounter/event prompt (actual height measured + clamped). */
+const FOOTER_PROMPT_RESERVE_PX = 56;
 /** Run phase label (Ready / Running / …). */
 const FOOTER_PHASE_LINE_PX = 15;
 /** Last-action line under phase. */
 const FOOTER_LAST_LINE_PX = 15;
 const FOOTER_STACK_GAP_PX = 4;
-/** Vertical band for D-pad or event choice row (same row; movement hidden during events). */
+/** Vertical band for D-pad (movement) or tall encounter choice row. */
 const FOOTER_DPAD_ZONE_PX =
   TOUCH_MOVEMENT_GAP * 2 + TOUCH_PAD_BTN + 12;
+/** Room for wrapped encounter title + body before phase line (see `layoutFooterMessages`). */
+const FOOTER_PROMPT_BUDGET_PX = 112;
 /**
  * Footer height = prompt + phase + last + gap + controls band.
- * Must be >= stacked Continue + Restart + padding so banners stay inside the footer.
+ * Must fit tall 3-line choice labels + title screen banners.
  */
 const UI_FOOTER_PX = Math.max(
+  FOOTER_PROMPT_BUDGET_PX +
+    FOOTER_PHASE_LINE_PX +
+    FOOTER_LAST_LINE_PX +
+    FOOTER_STACK_GAP_PX +
+    FOOTER_ABOVE_CHOICE_GAP_PX +
+    TOUCH_CHOICE_MAX_H,
   FOOTER_PROMPT_RESERVE_PX +
     FOOTER_PHASE_LINE_PX +
     FOOTER_LAST_LINE_PX +
@@ -216,9 +257,15 @@ export class GameScene extends Phaser.Scene {
   private keyY!: Phaser.Input.Keyboard.Key;
   private keyN!: Phaser.Input.Keyboard.Key;
   private keyB!: Phaser.Input.Keyboard.Key;
-  private keyPerk1!: Phaser.Input.Keyboard.Key;
-  private keyPerk2!: Phaser.Input.Keyboard.Key;
-  private keyPerk3!: Phaser.Input.Keyboard.Key;
+  private keyRelicCatalog1!: Phaser.Input.Keyboard.Key;
+  private keyRelicCatalog2!: Phaser.Input.Keyboard.Key;
+  private keyRelicCatalog3!: Phaser.Input.Keyboard.Key;
+  private keyRelicSlotPrev!: Phaser.Input.Keyboard.Key;
+  private keyRelicSlotNext!: Phaser.Input.Keyboard.Key;
+  private keyRelicSlotClear!: Phaser.Input.Keyboard.Key;
+  private keyRelicSlotUnlock!: Phaser.Input.Keyboard.Key;
+  /** Title loadout: focused slot index (not persisted). */
+  private titleFocusedRelicSlot = 0;
   private keyClearSave!: Phaser.Input.Keyboard.Key;
   private keyBracketLeft!: Phaser.Input.Keyboard.Key;
   private keyBracketRight!: Phaser.Input.Keyboard.Key;
@@ -241,6 +288,10 @@ export class GameScene extends Phaser.Scene {
   private gameWon = false;
   private enemiesDefeated = 0;
   private eventsResolved = 0;
+  private workDone = 0;
+  private workTarget = RUN_WORK_TARGET;
+  /** Successful grid moves this run (optional summary / debug). */
+  private turnsTaken = 0;
   private creditsAwardedForCurrentRun = false;
   private creditsEarnedThisRun = 0;
   /** Office credits already granted via encounters/pickups this run (end-of-run bonus subtracts this). */
@@ -286,6 +337,10 @@ export class GameScene extends Phaser.Scene {
   private touchMoveLabels: Phaser.GameObjects.Text[] = [];
   private touchEventHits: Phaser.GameObjects.Rectangle[] = [];
   private touchEventLabels: Phaser.GameObjects.Text[] = [];
+  /** Vertical center of D-pad or event choice row (updated in `syncTouchLayer`). */
+  private choiceBandCenterY = 0;
+  /** Row height for event choices, or movement band height for layout spacing. */
+  private choiceBandRowH = TOUCH_MOVEMENT_GAP * 2 + TOUCH_PAD_BTN;
 
   constructor() {
     super({ key: "GameScene" });
@@ -323,8 +378,8 @@ export class GameScene extends Phaser.Scene {
     return { x: p.x, y: p.y + this.boardWorldOffsetY() };
   }
 
-  /** Vertical center of D-pad / event choice row inside the footer. */
-  private touchControlsCenterY(): number {
+  /** Fallback before `syncTouchLayer` has run (matches legacy footer math). */
+  private computeDefaultChoiceBandCenterY(): number {
     return (
       this.footerTopY() +
       FOOTER_PROMPT_RESERVE_PX +
@@ -334,6 +389,14 @@ export class GameScene extends Phaser.Scene {
       TOUCH_MOVEMENT_GAP +
       TOUCH_PAD_BTN / 2
     );
+  }
+
+  /** Vertical center of D-pad / event choice row inside the footer. */
+  private touchControlsCenterY(): number {
+    if (this.touchLayerReady && this.choiceBandCenterY > 0) {
+      return this.choiceBandCenterY;
+    }
+    return this.computeDefaultChoiceBandCenterY();
   }
 
   private clearFooterPrompt(): void {
@@ -383,8 +446,34 @@ export class GameScene extends Phaser.Scene {
   private layoutFooterMessages(): void {
     if (!this.footerPhaseText || !this.statusText) return;
     const ft = this.footerTopY();
-    const yPhase = ft + FOOTER_PROMPT_RESERVE_PX + 2;
-    const yLast = yPhase + FOOTER_PHASE_LINE_PX;
+    const bandCenter = this.touchLayerReady
+      ? this.choiceBandCenterY
+      : this.computeDefaultChoiceBandCenterY();
+    const bandH = this.touchLayerReady
+      ? this.choiceBandRowH
+      : TOUCH_MOVEMENT_GAP * 2 + TOUCH_PAD_BTN;
+    const rowTop = bandCenter - bandH / 2;
+    const yLast = rowTop - FOOTER_ABOVE_CHOICE_GAP_PX - FOOTER_LAST_LINE_PX;
+    const yPhase = yLast - FOOTER_PHASE_LINE_PX;
+
+    if (this.footerPromptText) {
+      const wrapW = Math.max(100, this.scale.width - 2 * TOUCH_EDGE_INSET);
+      this.footerPromptText.setPosition(TOUCH_EDGE_INSET, ft + 4);
+      const maxBottom = yPhase - 6;
+      let fp = this.isCompactViewport() ? 10 : 11;
+      for (; fp >= 8; fp--) {
+        this.footerPromptText.setStyle(
+          uiTextStyle({
+            fontSize: `${fp}px`,
+            color: "#d8d8ee",
+            wordWrap: { width: wrapW },
+            lineSpacing: 2,
+          })
+        );
+        if (this.footerPromptText.getBounds().bottom <= maxBottom) break;
+      }
+    }
+
     this.footerPhaseText.setPosition(TOUCH_EDGE_INSET, yPhase);
     this.footerPhaseText.setOrigin(0, 0);
     this.statusText.setPosition(TOUCH_EDGE_INSET, yLast);
@@ -414,14 +503,15 @@ export class GameScene extends Phaser.Scene {
     let stress = layout.player.startStress;
     this.effectiveMaxEnergy = layout.player.maxEnergy;
     this.effectiveMaxStress = layout.player.maxStress;
-    const id = getEquippedPerkId();
-    const perk = id ? getPerkById(id) : undefined;
-    if (perk?.effect.kind === "extra_coffee") {
-      energy += 2;
-      this.effectiveMaxEnergy = layout.player.maxEnergy + 2;
+    const relicIds = getEquippedRelicIds();
+    const eBonus = aggregatedStartEnergyBonus(relicIds);
+    if (eBonus > 0) {
+      energy += eBonus;
+      this.effectiveMaxEnergy = layout.player.maxEnergy + eBonus;
     }
-    if (perk?.effect.kind === "calm_mind") {
-      stress = Math.max(0, stress - 2);
+    const sRed = aggregatedStartStressReduction(relicIds);
+    if (sRed > 0) {
+      stress = Math.max(0, stress - sRed);
     }
     const diffEnergy = energyBonus(this.selectedDifficulty);
     energy = Math.max(1, energy + diffEnergy);
@@ -431,10 +521,19 @@ export class GameScene extends Phaser.Scene {
 
   private playerDamagePerHit(layout: LayoutDef): number {
     let hit = layout.player.damagePerHit;
-    const id = getEquippedPerkId();
-    const perk = id ? getPerkById(id) : undefined;
-    if (perk?.effect.kind === "aggressive_reply") hit += 1;
+    hit += aggregatedDamageBonus(getEquippedRelicIds());
     return hit;
+  }
+
+  /**
+   * End-of-run credits from work performance (prompt4). In-run encounter grants
+   * reduce the top-up so nothing is double-awarded.
+   */
+  private computeRunPerformanceCredits(): number {
+    let base = Math.floor(this.workDone / 2);
+    if (this.gameWon) base += 5;
+    base += Math.floor(Math.max(0, this.player.energy) / 2);
+    return Math.max(1, base);
   }
 
   private maybeAwardRunCredits(): void {
@@ -446,14 +545,8 @@ export class GameScene extends Phaser.Scene {
       return;
     }
     this.creditsAwardedForCurrentRun = true;
-    const interactionCredits = Math.floor(
-      (this.enemiesDefeated + this.eventsResolved) / 2
-    );
-    const completionTotal = Math.max(
-      2,
-      interactionCredits + (this.gameWon ? 2 : 0)
-    );
-    const remainder = Math.max(0, completionTotal - this.creditsGrantedDuringRun);
+    const performanceTotal = this.computeRunPerformanceCredits();
+    const remainder = Math.max(0, performanceTotal - this.creditsGrantedDuringRun);
     if (remainder > 0) {
       addOfficeCredits(remainder);
     }
@@ -469,7 +562,7 @@ export class GameScene extends Phaser.Scene {
 
   /**
    * Ends the run if energy is depleted or stress hits the ceiling (energy checked first).
-   * @param energyDetail optional extra context for no-energy loss (e.g. combat).
+   * @param energyDetail optional extra context for logs only (no-energy UI is fixed copy).
    */
   private checkRunEndAfterVitals(energyDetail?: string): void {
     if (this.gameOver || this.gameWon) return;
@@ -477,12 +570,12 @@ export class GameScene extends Phaser.Scene {
       this.gameOver = true;
       this.gameOverReason = "no_energy";
       playGameOverSfx();
-      this.setStatusMessage(
-        energyDetail
-          ? `You ran out of energy (${energyDetail})`
-          : "You ran out of energy"
-      );
-      console.log("Game Over");
+      if (energyDetail) {
+        console.log(`Game Over (no energy): ${energyDetail}`);
+      } else {
+        console.log("Game Over");
+      }
+      this.setStatusMessage("Sent home early");
       return;
     }
     if (this.player.stress >= this.effectiveMaxStress) {
@@ -492,6 +585,26 @@ export class GameScene extends Phaser.Scene {
       this.setStatusMessage("You burned out (stress)");
       console.log("Game Over");
     }
+  }
+
+  private checkForWin(): void {
+    if (!this.runStarted || this.gameOver || this.gameWon) return;
+    if (this.workDone < this.workTarget) return;
+    this.gameWon = true;
+    playVictorySfx();
+    this.setStatusMessage("Work day complete");
+    console.log("Work day complete");
+    this.syncTouchLayer();
+    this.syncDebugState();
+  }
+
+  /** Adds work from an interaction and checks win (reward tile may call when granting work). */
+  private addWork(amount: number): void {
+    if (amount <= 0) return;
+    if (!this.runStarted || this.gameOver || this.gameWon) return;
+    this.workDone += amount;
+    this.updateHud();
+    this.checkForWin();
   }
 
   private ensureAudioUnlocked(): void {
@@ -512,24 +625,30 @@ export class GameScene extends Phaser.Scene {
     this.bgmMusic.play();
   }
 
-  /** Short perk name for compact HUD (modifiers stay in meta debug only). */
-  private formatHudPerkShort(): string | null {
-    const id = getEquippedPerkId();
-    const perk = id ? getPerkById(id) : undefined;
-    if (!perk) return null;
-    return perk.name;
+  /** Compact relic line for HUD (icons; avoids overflow with multiple relics). */
+  private formatHudRelicsShort(): string | null {
+    const ids = getEquippedRelicIds();
+    if (ids.length === 0) return null;
+    const icons = ids.map((id) => getRelicById(id)?.icon ?? "?").join("");
+    if (icons.length <= 6) return icons;
+    return `${ids.length} relics`;
   }
 
   private computeActiveRunModifiers():
     | GameDebugState["meta"]["activeRunModifiers"]
     | undefined {
-    const id = getEquippedPerkId();
-    const perk = id ? getPerkById(id) : undefined;
-    if (!perk) return undefined;
+    const c = countRelicEffects(getEquippedRelicIds());
+    if (
+      c.extraCoffee === 0 &&
+      c.calmMind === 0 &&
+      c.aggressiveReply === 0
+    ) {
+      return undefined;
+    }
     const m: NonNullable<GameDebugState["meta"]["activeRunModifiers"]> = {};
-    if (perk.effect.kind === "extra_coffee") m.energyDelta = 2;
-    if (perk.effect.kind === "calm_mind") m.stressDelta = -2;
-    if (perk.effect.kind === "aggressive_reply") m.damageBonus = 1;
+    if (c.extraCoffee > 0) m.energyDelta = 2 * c.extraCoffee;
+    if (c.calmMind > 0) m.stressDelta = -2 * c.calmMind;
+    if (c.aggressiveReply > 0) m.damageBonus = c.aggressiveReply;
     return m;
   }
 
@@ -569,6 +688,55 @@ export class GameScene extends Phaser.Scene {
   private formatSigned(value: number, label: string): string {
     if (value === 0) return `0 ${label}`;
     return `${value > 0 ? "+" : ""}${value} ${label}`;
+  }
+
+  private formatInteractionOutcomeParts(
+    energyDelta: number,
+    stressDelta: number,
+    workDelta: number
+  ): string {
+    const parts: string[] = [];
+    if (energyDelta !== 0) {
+      parts.push(this.formatSigned(energyDelta, "energy"));
+    }
+    if (stressDelta !== 0) {
+      parts.push(this.formatSigned(stressDelta, "stress"));
+    }
+    if (workDelta !== 0) {
+      parts.push(this.formatSigned(workDelta, "work"));
+    }
+    return parts.join(", ");
+  }
+
+  private formatEventChoiceButtonText(choice: EventChoiceDef): string {
+    const stress = scaledStressGain(choice.stressDelta, this.selectedDifficulty);
+    const line2 = this.formatInteractionOutcomeParts(
+      choice.energyDelta,
+      stress,
+      choice.workDelta
+    );
+    return line2 ? `${choice.label}\n${line2}` : choice.label;
+  }
+
+  private formatEncounterChoiceButtonText(
+    resolved: ResolvedEncounterChoice
+  ): string {
+    const stress = scaledStressGain(
+      resolved.stressDelta,
+      this.selectedDifficulty
+    );
+    const parts: string[] = [];
+    if (resolved.energyDelta !== 0) {
+      parts.push(this.formatSigned(resolved.energyDelta, "energy"));
+    }
+    if (stress !== 0) {
+      parts.push(this.formatSigned(stress, "stress"));
+    }
+    if (resolved.creditsDelta !== 0) {
+      parts.push(this.formatSigned(resolved.creditsDelta, "credits"));
+    }
+    const line2 = parts.join(", ");
+    return line2 ? `${resolved.label}\n${line2}` : resolved.label;
   }
 
   /** Short labels for event juice (floaters only; does not replace `lastEventResult`). */
@@ -725,6 +893,12 @@ export class GameScene extends Phaser.Scene {
       this.setStatusMessage("Blocked");
       return;
     }
+    if (this.player.energy <= 0) {
+      this.setStatusMessage("Too exhausted");
+      this.checkRunEndAfterVitals();
+      this.syncDebugState();
+      return;
+    }
 
     const ts = this.grid.tileSize;
     const dest = this.boardCellCenter(nx, ny);
@@ -751,6 +925,9 @@ export class GameScene extends Phaser.Scene {
     this.ensureAudioUnlocked();
     playMoveSfx();
 
+    this.player.energy -= 1;
+    this.turnsTaken += 1;
+
     if (this.tryEncounterAtTile(this.playerGridX, this.playerGridY)) {
       this.syncDebugState();
       return;
@@ -758,6 +935,11 @@ export class GameScene extends Phaser.Scene {
     this.tryRewardAtTile(this.playerGridX, this.playerGridY);
     this.tryExitAtTile(this.playerGridX, this.playerGridY);
     this.tryEventAtTile(this.playerGridX, this.playerGridY);
+    if (this.activeEventIndex !== null) {
+      this.syncDebugState();
+      return;
+    }
+    this.checkRunEndAfterVitals();
     this.syncDebugState();
   }
 
@@ -777,13 +959,10 @@ export class GameScene extends Phaser.Scene {
 
   /** Next layout restart (same as R when shown after run end). */
   private restartRunFromTouch(): void {
-    if (!this.runStarted || (!this.gameOver && !this.gameWon)) return;
-    this.runStarted = false;
-    this.stopRunMusic();
-    this.setupRunEntities(true);
+    this.dismissSummaryToTitle();
   }
 
-  /** Placeholder rewarded ad: +2 energy, clear game over, once per run. */
+  /** Rewarded ad / premium continue: refill energy to run max, clear game over, once per run. */
   private performRewardedContinue(): void {
     if (
       !this.runStarted ||
@@ -793,15 +972,12 @@ export class GameScene extends Phaser.Scene {
     ) {
       return;
     }
-    this.player.energy = Math.min(
-      this.effectiveMaxEnergy,
-      this.player.energy + 2
-    );
+    this.player.energy = this.effectiveMaxEnergy;
     this.gameOver = false;
     this.gameOverReason = null;
     this.continueUsedThisRun = true;
     this.sessionMetricsRecordedForRun = false;
-    this.setStatusMessage("Continue — +2 energy");
+    this.setStatusMessage("Continue — energy restored");
     this.startRunMusicIfNeeded();
     this.syncDebugState();
   }
@@ -880,6 +1056,41 @@ export class GameScene extends Phaser.Scene {
     lab.setDepth(TOUCH_LABEL_DEPTH);
     this.touchEventHits.push(hit);
     this.touchEventLabels.push(lab);
+  }
+
+  /**
+   * Shrinks choice label font until wrapped text fits in `TOUCH_CHOICE_MAX_H`.
+   * Returns the hit box height to use for this column.
+   */
+  private fitTouchChoiceLabel(
+    lab: Phaser.GameObjects.Text,
+    wrapW: number
+  ): number {
+    if (!lab.text || lab.text.length === 0) {
+      return TOUCH_CHOICE_MIN_H;
+    }
+    const innerMax = TOUCH_CHOICE_MAX_H - TOUCH_CHOICE_PAD_Y;
+    for (let fs = TOUCH_CHOICE_FONT_MAX_PX; fs >= TOUCH_CHOICE_FONT_MIN_PX; fs--) {
+      lab.setStyle(
+        uiTextStyle({
+          fontSize: `${fs}px`,
+          color: "#e4e4f2",
+          align: "center",
+          wordWrap: { width: Math.max(32, wrapW) },
+          lineSpacing: 2,
+        })
+      );
+      if (lab.height <= innerMax || fs === TOUCH_CHOICE_FONT_MIN_PX) {
+        return Math.max(
+          TOUCH_CHOICE_MIN_H,
+          Math.min(
+            TOUCH_CHOICE_MAX_H,
+            Math.ceil(lab.height + TOUCH_CHOICE_PAD_Y)
+          )
+        );
+      }
+    }
+    return TOUCH_CHOICE_MAX_H;
   }
 
   private addTouchBannerButton(
@@ -1056,6 +1267,14 @@ export class GameScene extends Phaser.Scene {
         this.checkRunEndAfterVitals();
         this.syncDebugState();
       },
+      setEnergyForTest: (n: number, uncapped?: boolean) => {
+        if (!this.runStarted || this.gameOver || this.gameWon) return;
+        this.player.energy = uncapped
+          ? Math.max(0, n)
+          : Math.max(0, Math.min(this.effectiveMaxEnergy, n));
+        this.updateHud();
+        this.syncDebugState();
+      },
       rewardedContinue: () => {
         if (this.computeTouchUiFlags().continueReward) {
           this.performRewardedContinue();
@@ -1071,7 +1290,101 @@ export class GameScene extends Phaser.Scene {
     const h = this.scale.height;
     const bottomPad = this.isCompactViewport() ? 8 : 12;
     const cx = this.clampMovementPadCenterX(w);
-    const cy = this.touchControlsCenterY();
+    const flags = this.computeTouchUiFlags();
+
+    const footerBottom = this.footerTopY() + UI_FOOTER_PX;
+    const moveBandH = TOUCH_MOVEMENT_GAP * 2 + TOUCH_PAD_BTN;
+
+    const usableW = w - 2 * TOUCH_EDGE_INSET;
+    const evGap = 8;
+    const threeChoiceEncounter =
+      this.activeEncounterEnemyIndex !== null &&
+      getEncounterById(
+        this.enemyRuntimeEncounterIds[this.activeEncounterEnemyIndex]!
+      ).choices.length > 2;
+    const evW2 = Math.min(
+      184,
+      Math.max(88, Math.floor((usableW - evGap) / 2))
+    );
+    const evW3 = Math.min(
+      140,
+      Math.max(76, Math.floor((usableW - evGap * 2) / 3))
+    );
+    const evW = threeChoiceEncounter ? evW3 : evW2;
+    const leftCx = TOUCH_EDGE_INSET + evW / 2;
+    const midCx = TOUCH_EDGE_INSET + evW + evGap + evW / 2;
+    const rightCx = TOUCH_EDGE_INSET + (evW + evGap) * 2 + evW / 2;
+    const twoLeftCx = TOUCH_EDGE_INSET + evW2 / 2;
+    const twoMidCx = TOUCH_EDGE_INSET + evW2 + evGap + evW2 / 2;
+
+    if (flags.event && this.activeEventIndex !== null) {
+      const idx = this.activeEventIndex;
+      const typeId = this.eventRuntimeTypeIds[idx];
+      if (typeId) {
+        const et = getEventType(typeId);
+        if (isChoiceEvent(et)) {
+          this.touchEventLabels[0]?.setText(
+            this.formatEventChoiceButtonText(et.choiceY)
+          );
+          this.touchEventLabels[1]?.setText(
+            this.formatEventChoiceButtonText(et.choiceN)
+          );
+        }
+      }
+    } else if (flags.event && this.activeEncounterEnemyIndex !== null) {
+      const eid =
+        this.enemyRuntimeEncounterIds[this.activeEncounterEnemyIndex];
+      if (eid) {
+        const enc = getEncounterById(eid);
+        const relicIds = getEquippedRelicIds();
+        this.touchEventLabels[0]?.setText(
+          this.formatEncounterChoiceButtonText(
+            resolveEncounterChoiceWithRelics(enc.choices[0], relicIds)
+          )
+        );
+        this.touchEventLabels[1]?.setText(
+          this.formatEncounterChoiceButtonText(
+            resolveEncounterChoiceWithRelics(enc.choices[1], relicIds)
+          )
+        );
+        const third = enc.choices[2];
+        if (third) {
+          this.touchEventLabels[2]?.setText(
+            this.formatEncounterChoiceButtonText(
+              resolveEncounterChoiceWithRelics(third, relicIds)
+            )
+          );
+        }
+      }
+    }
+
+    let cy: number;
+    let choiceRowH = moveBandH;
+    if (flags.event) {
+      const wrapPair = (threeChoiceEncounter ? evW : evW2) - 10;
+      let maxFit = TOUCH_CHOICE_MIN_H;
+      const l0 = this.touchEventLabels[0];
+      const l1 = this.touchEventLabels[1];
+      const l2 = this.touchEventLabels[2];
+      if (l0) maxFit = Math.max(maxFit, this.fitTouchChoiceLabel(l0, wrapPair));
+      if (l1) maxFit = Math.max(maxFit, this.fitTouchChoiceLabel(l1, wrapPair));
+      if (threeChoiceEncounter && l2) {
+        maxFit = Math.max(maxFit, this.fitTouchChoiceLabel(l2, evW3 - 10));
+      }
+      choiceRowH = Math.min(
+        TOUCH_CHOICE_MAX_H,
+        Math.max(TOUCH_CHOICE_MIN_H, maxFit)
+      );
+      cy = footerBottom - 14 - choiceRowH / 2;
+      this.choiceBandCenterY = cy;
+      this.choiceBandRowH = choiceRowH;
+    } else {
+      cy = footerBottom - 14 - moveBandH / 2;
+      this.choiceBandCenterY = cy;
+      this.choiceBandRowH = moveBandH;
+    }
+
+    const evY = cy;
 
     const padOrder = [
       { x: cx, y: cy - TOUCH_MOVEMENT_GAP },
@@ -1085,66 +1398,38 @@ export class GameScene extends Phaser.Scene {
       this.touchMoveLabels[i]?.setPosition(pos.x, pos.y);
     }
 
-    const evY = cy;
-    const usableW = w - 2 * TOUCH_EDGE_INSET;
-    const evGap = 8;
-    const threeChoiceEncounter =
-      this.activeEncounterEnemyIndex !== null &&
-      getEncounterById(
-        this.enemyRuntimeEncounterIds[this.activeEncounterEnemyIndex]!
-      ).choices.length > 2;
-    const evW2 = Math.min(
-      160,
-      Math.max(72, Math.floor((usableW - evGap) / 2))
+    this.touchEventHits[0]?.setPosition(
+      threeChoiceEncounter ? leftCx : twoLeftCx,
+      evY
     );
-    const evW3 = Math.min(
-      100,
-      Math.max(56, Math.floor((usableW - evGap * 2) / 3))
+    this.touchEventHits[0]?.setSize(
+      threeChoiceEncounter ? evW : evW2,
+      choiceRowH
     );
-    const evW = threeChoiceEncounter ? evW3 : evW2;
-    const leftCx = TOUCH_EDGE_INSET + evW / 2;
-    const midCx = TOUCH_EDGE_INSET + evW + evGap + evW / 2;
-    const rightCx =
-      TOUCH_EDGE_INSET + (evW + evGap) * 2 + evW / 2;
-    this.touchEventHits[0]?.setPosition(leftCx, evY);
-    this.touchEventHits[0]?.setSize(evW, TOUCH_BTN);
-    this.touchEventLabels[0]?.setPosition(leftCx, evY);
-    this.touchEventLabels[0]?.setStyle(
-      uiTextStyle({ wordWrap: { width: evW - 8 } })
+    this.touchEventLabels[0]?.setPosition(
+      threeChoiceEncounter ? leftCx : twoLeftCx,
+      evY
     );
+    this.touchEventLabels[0]?.setOrigin(0.5, 0.5);
+
     this.touchEventHits[1]?.setPosition(
-      threeChoiceEncounter ? midCx : TOUCH_EDGE_INSET + evW2 + evGap + evW2 / 2,
+      threeChoiceEncounter ? midCx : twoMidCx,
       evY
     );
     this.touchEventHits[1]?.setSize(
       threeChoiceEncounter ? evW : evW2,
-      TOUCH_BTN
+      choiceRowH
     );
     this.touchEventLabels[1]?.setPosition(
-      threeChoiceEncounter ? midCx : TOUCH_EDGE_INSET + evW2 + evGap + evW2 / 2,
+      threeChoiceEncounter ? midCx : twoMidCx,
       evY
     );
-    this.touchEventLabels[1]?.setStyle(
-      uiTextStyle({
-        wordWrap: { width: (threeChoiceEncounter ? evW : evW2) - 8 },
-      })
-    );
-    if (!threeChoiceEncounter) {
-      this.touchEventHits[0]?.setSize(evW2, TOUCH_BTN);
-      this.touchEventLabels[0]?.setPosition(
-        TOUCH_EDGE_INSET + evW2 / 2,
-        evY
-      );
-      this.touchEventLabels[0]?.setStyle(
-        uiTextStyle({ wordWrap: { width: evW2 - 8 } })
-      );
-    }
+    this.touchEventLabels[1]?.setOrigin(0.5, 0.5);
+
     this.touchEventHits[2]?.setPosition(rightCx, evY);
-    this.touchEventHits[2]?.setSize(evW3, TOUCH_BTN);
+    this.touchEventHits[2]?.setSize(evW3, choiceRowH);
     this.touchEventLabels[2]?.setPosition(rightCx, evY);
-    this.touchEventLabels[2]?.setStyle(
-      uiTextStyle({ wordWrap: { width: evW3 - 8 } })
-    );
+    this.touchEventLabels[2]?.setOrigin(0.5, 0.5);
 
     const restartY = h - bottomPad - TOUCH_BTN / 2;
     const continueY = restartY - TOUCH_BTN - TOUCH_BANNER_GAP;
@@ -1158,8 +1443,6 @@ export class GameScene extends Phaser.Scene {
     this.touchContinueHit?.setPosition(w / 2, continueY);
     this.touchContinueLabel?.setPosition(w / 2, continueY);
     this.touchContinueHit?.setSize(bw, TOUCH_BTN);
-
-    const flags = this.computeTouchUiFlags();
     const moveChrome =
       flags.movement && this.showTouchMovementChrome();
     const setGroup = (
@@ -1233,30 +1516,6 @@ export class GameScene extends Phaser.Scene {
       }
     }
 
-    if (flags.event && this.activeEventIndex !== null) {
-      const idx = this.activeEventIndex;
-      const typeId = this.eventRuntimeTypeIds[idx];
-      if (typeId) {
-        const et = getEventType(typeId);
-        if (isChoiceEvent(et)) {
-          this.touchEventLabels[0]?.setText(et.choiceY.label);
-          this.touchEventLabels[1]?.setText(et.choiceN.label);
-        }
-      }
-    } else if (flags.event && this.activeEncounterEnemyIndex !== null) {
-      const eid =
-        this.enemyRuntimeEncounterIds[this.activeEncounterEnemyIndex];
-      if (eid) {
-        const enc = getEncounterById(eid);
-        this.touchEventLabels[0]?.setText(enc.choices[0].label);
-        this.touchEventLabels[1]?.setText(enc.choices[1].label);
-        const third = enc.choices[2];
-        if (third) {
-          this.touchEventLabels[2]?.setText(third.label);
-        }
-      }
-    }
-
     const mirror = document.getElementById("touch-ui-test-mirror");
     if (mirror) {
       const parts: string[] = [];
@@ -1283,9 +1542,27 @@ export class GameScene extends Phaser.Scene {
     this.keyY = this.input.keyboard!.addKey(Phaser.Input.Keyboard.KeyCodes.Y);
     this.keyN = this.input.keyboard!.addKey(Phaser.Input.Keyboard.KeyCodes.N);
     this.keyB = this.input.keyboard!.addKey(Phaser.Input.Keyboard.KeyCodes.B);
-    this.keyPerk1 = this.input.keyboard!.addKey(Phaser.Input.Keyboard.KeyCodes.ONE);
-    this.keyPerk2 = this.input.keyboard!.addKey(Phaser.Input.Keyboard.KeyCodes.TWO);
-    this.keyPerk3 = this.input.keyboard!.addKey(Phaser.Input.Keyboard.KeyCodes.THREE);
+    this.keyRelicCatalog1 = this.input.keyboard!.addKey(
+      Phaser.Input.Keyboard.KeyCodes.ONE
+    );
+    this.keyRelicCatalog2 = this.input.keyboard!.addKey(
+      Phaser.Input.Keyboard.KeyCodes.TWO
+    );
+    this.keyRelicCatalog3 = this.input.keyboard!.addKey(
+      Phaser.Input.Keyboard.KeyCodes.THREE
+    );
+    this.keyRelicSlotPrev = this.input.keyboard!.addKey(
+      Phaser.Input.Keyboard.KeyCodes.COMMA
+    );
+    this.keyRelicSlotNext = this.input.keyboard!.addKey(
+      Phaser.Input.Keyboard.KeyCodes.PERIOD
+    );
+    this.keyRelicSlotClear = this.input.keyboard!.addKey(
+      Phaser.Input.Keyboard.KeyCodes.ZERO
+    );
+    this.keyRelicSlotUnlock = this.input.keyboard!.addKey(
+      Phaser.Input.Keyboard.KeyCodes.U
+    );
     this.keyClearSave = this.input.keyboard!.addKey(
       Phaser.Input.Keyboard.KeyCodes.C
     );
@@ -1350,6 +1627,7 @@ export class GameScene extends Phaser.Scene {
     );
     this.footerPhaseText.setScrollFactor(0, 0);
     this.footerPhaseText.setDepth(STATUS_DEPTH);
+    this.footerPhaseText.setVisible(false);
 
     this.statusText = this.add.text(
       0,
@@ -1362,6 +1640,7 @@ export class GameScene extends Phaser.Scene {
     );
     this.statusText.setScrollFactor(0, 0);
     this.statusText.setDepth(STATUS_DEPTH);
+    this.statusText.setVisible(false);
 
     this.setupRunEntities(false);
     this.createTouchControlsOnce();
@@ -1400,6 +1679,7 @@ export class GameScene extends Phaser.Scene {
     this.grid = new GridSystem(gridSpec);
     this.blockedCells = layoutBlockedSet(layout);
     warnBlockedTileEntityOverlaps(layout, this.blockedCells);
+    warnIfExitUnreachable(layout, this.blockedCells);
     this.drawGrid(layout);
 
     this.gameOver = false;
@@ -1410,6 +1690,9 @@ export class GameScene extends Phaser.Scene {
     this.sessionMetricsRecordedForRun = false;
     this.enemiesDefeated = 0;
     this.eventsResolved = 0;
+    this.workDone = 0;
+    this.workTarget = RUN_WORK_TARGET;
+    this.turnsTaken = 0;
     this.creditsAwardedForCurrentRun = false;
     this.creditsEarnedThisRun = 0;
     this.creditsGrantedDuringRun = 0;
@@ -1628,6 +1911,14 @@ export class GameScene extends Phaser.Scene {
     if (mirror) mirror.textContent = "";
   }
 
+  /** Leave finished run for title / meta (new layout). Idempotent guards in caller. */
+  private dismissSummaryToTitle(): void {
+    if (!this.runStarted || (!this.gameOver && !this.gameWon)) return;
+    this.runStarted = false;
+    this.stopRunMusic();
+    this.setupRunEntities(true);
+  }
+
   private syncRunSummaryOverlay(): void {
     if (!this.runStarted || (!this.gameOver && !this.gameWon)) {
       this.hideRunSummaryOverlay();
@@ -1635,13 +1926,9 @@ export class GameScene extends Phaser.Scene {
     }
 
     const layout = this.activeLayout();
-    const resultLabel = this.gameWon ? "Victory" : "Game Over";
-    const whyLine =
-      this.gameOver && this.gameOverReason === "no_energy"
-        ? "Why: You ran out of energy"
-        : this.gameOver && this.gameOverReason === "burnout"
-          ? "Why: You burned out (stress)"
-          : null;
+    const headline = this.gameWon ? "Work Day Complete" : "Sent Home Early";
+    const flavorWin = "You made it through the day.";
+    const flavorLoss = "You burned out before finishing.";
 
     const distToExit =
       Math.abs(this.playerGridX - layout.exit.x) +
@@ -1652,48 +1939,42 @@ export class GameScene extends Phaser.Scene {
         lossEncouragement.push("So close...");
       }
       lossEncouragement.push("One more run?");
-      const tease = getNextPerkUnlockTease();
+      const tease = getNextRelicUnlockTease();
       if (tease) lossEncouragement.push(tease);
     }
 
-    const summaryLines: string[] = [];
-    if (this.gameWon) {
-      summaryLines.push("You made it through the office!", "");
-    }
-    summaryLines.push(`Result: ${resultLabel}`);
-    if (whyLine) summaryLines.push(whyLine);
-    if (this.gameWon) {
-      summaryLines.push(
-        `Reward: +${this.creditsEarnedThisRun} Office Credits this run`
-      );
-    }
-    if (lossEncouragement.length) {
-      summaryLines.push(""); // space after result/why before encouragement
-      summaryLines.push(...lossEncouragement);
-    }
-    summaryLines.push(
-      `Final Energy: ${this.player.energy}`,
-      `Final Stress: ${this.player.stress}`,
-      `Enemies Defeated: ${this.enemiesDefeated}`,
-      `Events Resolved: ${this.eventsResolved}`,
-      `Credits earned (this run): ${this.creditsEarnedThisRun}`,
-      `Office Credits (total): ${getOfficeCredits()}`,
-      `Layout: ${layout.name} [${layout.id}] (${this.currentLayoutIndex})`
+    const creditsLine = `Credits Earned: +${this.creditsEarnedThisRun}`;
+    const creditsBlock = ["  ----------", `  ${creditsLine}`, "  ----------"].join(
+      "\n"
     );
-    if (this.gameOver) {
-      summaryLines.push("");
-      if (!this.continueUsedThisRun) {
-        summaryLines.push("Continue: available");
-        const contLabel = getPremiumNoAdsEnabled() ? "Continue" : "Continue (Ad)";
-        summaryLines.push(`Press Enter — ${contLabel}`);
-      } else {
-        summaryLines.push("Continue: used this run");
-      }
+    const summaryLines: string[] = [
+      headline,
+      "",
+      `Work Completed: ${this.workDone} / ${this.workTarget}`,
+      "",
+      creditsBlock,
+      "",
+      this.gameWon ? flavorWin : flavorLoss,
+    ];
+    if (lossEncouragement.length) {
+      summaryLines.push("", ...lossEncouragement);
     }
     summaryLines.push(
       "",
-      "Tap Restart (on-screen) or Press R or Space to Restart"
+      `Total Office Credits: ${getOfficeCredits()}`,
+      "",
+      "Press any key or tap here to continue (Space / R)",
+      "— or tap Restart below —"
     );
+    if (this.gameOver) {
+      if (!this.continueUsedThisRun) {
+        summaryLines.push("", "Continue: available");
+        const contLabel = getPremiumNoAdsEnabled() ? "Continue" : "Continue (Ad)";
+        summaryLines.push(`Press Enter — ${contLabel} (resume run)`);
+      } else {
+        summaryLines.push("", "Continue: used this run");
+      }
+    }
 
     const body = summaryLines.join("\n");
 
@@ -1706,6 +1987,11 @@ export class GameScene extends Phaser.Scene {
       g.fillRect(0, 0, vw, vh);
       g.setScrollFactor(0, 0);
       g.setDepth(SUMMARY_DEPTH);
+      g.setInteractive(
+        new Phaser.Geom.Rectangle(0, 0, vw, vh),
+        Phaser.Geom.Rectangle.Contains
+      );
+      g.on("pointerdown", () => this.dismissSummaryToTitle());
       this.runSummaryBg = g;
     } else {
       this.runSummaryBg.clear();
@@ -1713,13 +1999,15 @@ export class GameScene extends Phaser.Scene {
       this.runSummaryBg.fillRect(0, 0, vw, vh);
     }
 
+    const baseFs = this.isCompactViewport() ? "13px" : "16px";
+
     if (!this.runSummaryText) {
       const t = this.add.text(
         vw / 2,
         vh / 2,
         body,
         uiTextStyle({
-          fontSize: this.isCompactViewport() ? "13px" : "16px",
+          fontSize: baseFs,
           color: "#e8e8ff",
           align: "center",
         })
@@ -1731,9 +2019,7 @@ export class GameScene extends Phaser.Scene {
     } else {
       this.runSummaryText.setText(body);
       this.runSummaryText.setStyle(
-        uiTextStyle({
-          fontSize: this.isCompactViewport() ? "13px" : "16px",
-        })
+        uiTextStyle({ fontSize: baseFs, color: "#e8e8ff", align: "center" })
       );
     }
 
@@ -1756,8 +2042,13 @@ export class GameScene extends Phaser.Scene {
     const cy = vh / 2;
     const compact = this.isCompactViewport();
     const credits = getOfficeCredits();
-    const unlocked = new Set(getUnlockedPerkIds());
-    const equipped = getEquippedPerkId();
+    const unlocked = new Set(getUnlockedRelicIds());
+    const slots = getEquippedRelicSlots();
+    const slotCount = getRelicSlotCount();
+    this.titleFocusedRelicSlot = Math.max(
+      0,
+      Math.min(this.titleFocusedRelicSlot, Math.max(0, slotCount - 1))
+    );
     const st = getSessionStatsForDebug();
     const avgPart =
       st.runsCompleted > 0 && st.averageRunLengthSeconds > 0
@@ -1785,31 +2076,74 @@ export class GameScene extends Phaser.Scene {
         y: compact ? -56 : -58,
       },
       {
-        text: `Difficulty: ${difficultyLabel(this.selectedDifficulty)} — [ ] to cycle`,
+        text: `Difficulty: ${difficultyHudIcon(this.selectedDifficulty)} ${difficultyLabel(this.selectedDifficulty)} — [ ] to cycle`,
         fontSize: compact ? "11px" : "12px",
         y: compact ? -40 : -42,
       },
     ];
     let y = compact ? -28 : -32;
-    const perkStep = compact ? 14 : 16;
-    const perkFs = compact ? "11px" : "12px";
-    for (let i = 0; i < PERKS.length; i++) {
-      const p = PERKS[i]!;
-      const isUnlocked = unlocked.has(p.id);
-      const isEquipped = equipped === p.id;
-      const lock = isUnlocked ? "unlocked" : `locked (${p.cost} cr)`;
-      const eq = isEquipped ? " [equipped]" : "";
+    const smallFs = compact ? "11px" : "12px";
+    lines.push({
+      text: `Relics — ${slotCount}/${MAX_RELIC_SLOTS} slots · focus ${this.titleFocusedRelicSlot + 1} (, .) · 0 clear · U unlock`,
+      fontSize: smallFs,
+      y,
+    });
+    y += compact ? 15 : 17;
+    for (let s = 0; s < slotCount; s++) {
+      const id = slots[s] ?? null;
+      const def = id ? getRelicById(id) : undefined;
+      const label = def ? `${def.icon} ${def.name}` : "— empty —";
+      const focus = s === this.titleFocusedRelicSlot ? "  ◀ focus" : "";
       lines.push({
-        text: `[${i + 1}] ${p.name} — ${lock}${eq}`,
-        fontSize: perkFs,
+        text: `  Slot ${s + 1}: ${label}${focus}`,
+        fontSize: smallFs,
         y,
       });
-      y += perkStep;
+      y += compact ? 15 : 17;
+    }
+    if (slotCount < MAX_RELIC_SLOTS) {
+      const nextN = slotCount + 1;
+      const rule = RELIC_SLOT_UNLOCK_RULES[nextN];
+      if (rule) {
+        const ruleStr =
+          rule.kind === "credits"
+            ? `${rule.cost} cr`
+            : `${rule.need} wins (have ${st.wins})`;
+        lines.push({
+          text: `  Next slot (${nextN}): need ${ruleStr} — press U`,
+          fontSize: smallFs,
+          y,
+        });
+        y += compact ? 15 : 17;
+      }
+    }
+    lines.push({
+      text: "Catalog (assign to focused slot):",
+      fontSize: smallFs,
+      y,
+    });
+    y += compact ? 15 : 17;
+    for (let i = 0; i < RELICS.length; i++) {
+      const p = RELICS[i]!;
+      const isUnlocked = unlocked.has(p.id);
+      const inLoadout = slots.includes(p.id);
+      const costStr = `${p.cost} cr`;
+      const state = isUnlocked
+        ? inLoadout
+          ? "In loadout"
+          : "Unlocked"
+        : `Locked · need ${Math.max(0, p.cost - credits)} more`;
+      lines.push({
+        text: `[${i + 1}] ${p.icon} ${p.name} · ${costStr} · ${state}`,
+        fontSize: smallFs,
+        y,
+      });
+      y += compact ? 15 : 17;
     }
     y += compact ? 4 : 6;
     const hintFs = compact ? "11px" : "12px";
     lines.push({
-      text: "Tap Start (below) or Space — 1–3: perks",
+      text: "Tap Start (below) or Space — 1–3: assign relic to focused slot",
       fontSize: hintFs,
       y,
     });
@@ -1911,6 +2245,7 @@ export class GameScene extends Phaser.Scene {
       lastActionResult: this.latestMessageStr,
       playerPosition: { x: this.playerGridX, y: this.playerGridY },
       playerEnergy: this.player.energy,
+      playerEnergyMax: this.effectiveMaxEnergy,
       playerStress: this.player.stress,
       enemies: this.enemies.map((e) => ({
         name: e.name,
@@ -1940,15 +2275,20 @@ export class GameScene extends Phaser.Scene {
       gameOver: this.gameOver,
       gameOverReason: this.gameOverReason,
       gameWon: this.gameWon,
+      workDone: this.workDone,
+      workTarget: this.workTarget,
       runStats: {
         enemiesDefeated: this.enemiesDefeated,
         eventsResolved: this.eventsResolved,
+        turnsTaken: this.turnsTaken,
       },
       latestMessage: this.latestMessageStr,
       meta: {
         officeCredits: getOfficeCredits(),
-        equippedPerkId: getEquippedPerkId(),
-        unlockedPerkIds: getUnlockedPerkIds(),
+        equippedRelicIds: getEquippedRelicSlots(),
+        unlockedRelicIds: getUnlockedRelicIds(),
+        relicSlotCount: getRelicSlotCount(),
+        titleFocusedRelicSlot: this.titleFocusedRelicSlot,
         creditsEarnedThisRun: this.creditsEarnedThisRun,
         metaLoadedFromStorage: wasMetaLoadedFromStorage(),
         activeRunModifiers:
@@ -1980,8 +2320,8 @@ export class GameScene extends Phaser.Scene {
       this.activeEventIndex !== null ||
       this.activeEncounterEnemyIndex !== null;
     if (!this.runStarted) return "Ready";
-    if (this.gameOver) return "Game Over";
-    if (this.gameWon) return "Victory";
+    if (this.gameOver) return "Sent Home Early";
+    if (this.gameWon) return "Work Day Complete";
     if (eventActive) return "Event";
     return "Running";
   }
@@ -1993,12 +2333,15 @@ export class GameScene extends Phaser.Scene {
   private updateHud(): void {
     const layout = this.activeLayout();
     const credits = getOfficeCredits();
-    const line1 = `⚡ ${this.player.energy}/${this.effectiveMaxEnergy}   ~ ${this.player.stress}/${this.effectiveMaxStress}   Cr ${credits}`;
-    const perk = this.formatHudPerkShort();
-    const shortLayout =
+    const line1 = `⚡ ${this.player.energy}/${this.effectiveMaxEnergy}   🤯 ${this.player.stress}/${this.effectiveMaxStress}   💰 ${credits}   💼 ${this.workDone}/${this.workTarget}`;
+    const relicHud = this.formatHudRelicsShort();
+    const shortName =
       layout.name.length > 16 ? `${layout.name.slice(0, 15)}…` : layout.name;
-    const line2 = perk
-      ? `${shortLayout} · ${perk}`
+    const shortLayout = layout.hudIcon
+      ? `${layout.hudIcon} ${shortName}`
+      : shortName;
+    const line2 = relicHud
+      ? `${shortLayout} · ${relicHud}`
       : `${shortLayout} (${layout.id})`;
     const body = `${line1}\n${line2}`;
     this.hudText.setStyle(uiTextStyle({ fontSize: this.hudFontSizePx() }));
@@ -2111,7 +2454,10 @@ export class GameScene extends Phaser.Scene {
     if (!raw) return;
 
     playEventChoiceSfx();
-    const resolved = resolveEncounterChoiceWithPerks(raw, getEquippedPerkId());
+    const resolved = resolveEncounterChoiceWithRelics(
+      raw,
+      getEquippedRelicIds()
+    );
     const stressDelta = scaledStressGain(
       resolved.stressDelta,
       this.selectedDifficulty
@@ -2144,12 +2490,22 @@ export class GameScene extends Phaser.Scene {
       this.playerGridX,
       this.playerGridY
     );
+    const outcomeRows =
+      (dE !== 0 ? 1 : 0) + (dS !== 0 ? 1 : 0) + (dC !== 0 ? 1 : 0);
+    const problemRow = outcomeRows > 0 ? outcomeRows : 0;
     this.spawnFloater(
       pCenter.x,
       pCenter.y,
       "Problem solved",
       FLOAT_COLOR_EVENT,
-      -14 * (dE !== 0 || dS !== 0 || dC !== 0 ? 3 : 2)
+      -14 * (problemRow > 0 ? problemRow + 1 : 2)
+    );
+    this.spawnFloater(
+      pCenter.x,
+      pCenter.y,
+      `+${WORK_PER_ENEMY_DEFEAT} Work`,
+      FLOAT_COLOR_EVENT,
+      -14 * (problemRow > 0 ? problemRow + 2 : 3)
     );
 
     if (this.playerRect) {
@@ -2159,7 +2515,7 @@ export class GameScene extends Phaser.Scene {
       );
     }
 
-    this.lastEventResult = `${enc.name}: ${resolved.label} (${this.formatSigned(resolved.energyDelta, "Energy")}, ${this.formatSigned(stressDelta, "Stress")}${dC !== 0 ? `, ${this.formatSigned(dC, "Credits")}` : ""})`;
+    this.lastEventResult = `${enc.name}: ${resolved.label} (${this.formatSigned(resolved.energyDelta, "Energy")}, ${this.formatSigned(stressDelta, "Stress")}${dC !== 0 ? `, ${this.formatSigned(dC, "Credits")}` : ""}, ${this.formatSigned(WORK_PER_ENEMY_DEFEAT, "Work")})`;
 
     const enemy = this.enemies[idx]!;
     enemy.hp = 0;
@@ -2195,6 +2551,7 @@ export class GameScene extends Phaser.Scene {
     }
 
     console.log("Encounter resolved");
+    this.addWork(WORK_PER_ENEMY_DEFEAT);
     this.checkRunEndAfterVitals(
       this.player.energy <= 0
         ? `drained by ${enc.name} (${resolved.label})`
@@ -2210,19 +2567,19 @@ export class GameScene extends Phaser.Scene {
     if (!this.reward.available) return;
     if (gridX !== this.reward.gridX || gridY !== this.reward.gridY) return;
 
-    const energyBefore = this.player.energy;
-    this.player.energy = Math.min(
-      this.player.energy + layout.reward.energyRestore,
-      this.effectiveMaxEnergy
-    );
-    const energyGained = this.player.energy - energyBefore;
     const rewardCenter = this.boardCellCenter(gridX, gridY);
-    if (energyGained > 0) {
+    const workPick =
+      layout.reward.workRestore != null && layout.reward.workRestore > 0
+        ? layout.reward.workRestore
+        : 0;
+
+    if (workPick > 0) {
+      this.addWork(workPick);
       this.spawnFloater(
         rewardCenter.x,
         rewardCenter.y,
-        `+${energyGained} Energy`,
-        FLOAT_COLOR_ENERGY_GAIN
+        `+${workPick} Work`,
+        FLOAT_COLOR_EVENT
       );
       this.spawnFloater(
         rewardCenter.x,
@@ -2231,7 +2588,37 @@ export class GameScene extends Phaser.Scene {
         FLOAT_COLOR_EVENT,
         -14
       );
+      this.setStatusMessage(`Gained ${workPick} work`);
+    } else {
+      const energyBefore = this.player.energy;
+      const restore = layout.reward.energyRestore ?? 0;
+      this.player.energy = Math.min(
+        this.player.energy + restore,
+        this.effectiveMaxEnergy
+      );
+      const energyGained = this.player.energy - energyBefore;
+      if (energyGained > 0) {
+        this.spawnFloater(
+          rewardCenter.x,
+          rewardCenter.y,
+          `+${energyGained} Energy`,
+          FLOAT_COLOR_ENERGY_GAIN
+        );
+        this.spawnFloater(
+          rewardCenter.x,
+          rewardCenter.y,
+          "Gained Reward",
+          FLOAT_COLOR_EVENT,
+          -14
+        );
+      }
+      this.setStatusMessage(
+        energyGained > 0
+          ? `Gained ${energyGained} energy`
+          : "No energy gained (already at max)"
+      );
     }
+
     this.reward.available = false;
     playRewardSfx();
     if (this.rewardRect) {
@@ -2242,33 +2629,23 @@ export class GameScene extends Phaser.Scene {
       this.rewardLabel.destroy();
       this.rewardLabel = null;
     }
-    this.setStatusMessage(
-      energyGained > 0
-        ? `Gained ${energyGained} energy`
-        : "No energy gained (already at max)"
-    );
     console.log("Reward collected");
-    console.log("Player energy restored");
+    this.syncDebugState();
   }
 
+  /** Exit door tile (marked "X"): win if work quota is met; otherwise nudge the player. */
   private tryExitAtTile(gridX: number, gridY: number): void {
     const layout = this.activeLayout();
     if (this.gameOver || this.gameWon) return;
     if (gridX !== layout.exit.x || gridY !== layout.exit.y) return;
 
-    console.log("Exit reached");
-    console.log("You Win");
-    this.gameWon = true;
-    playVictorySfx();
-    this.setStatusMessage("You Win");
-    if (this.exitRect) {
-      this.exitRect.destroy();
-      this.exitRect = null;
+    if (this.workDone >= this.workTarget) {
+      this.checkForWin();
+      return;
     }
-    if (this.exitLabel) {
-      this.exitLabel.destroy();
-      this.exitLabel = null;
-    }
+    this.setStatusMessage("Exit — finish your work first");
+    const c = this.boardCellCenter(gridX, gridY);
+    this.spawnFloater(c.x, c.y, "Need more work", FLOAT_COLOR_EVENT, -12);
   }
 
   private assignEventRuntimeTypes(layout: LayoutDef): void {
@@ -2344,6 +2721,9 @@ export class GameScene extends Phaser.Scene {
     if (stressExtra !== 0) {
       detail.push(this.formatSigned(stressExtra, "Stress"));
     }
+    if (et.workDelta !== 0) {
+      detail.push(this.formatSigned(et.workDelta, "Work"));
+    }
     this.lastEventResult =
       detail.length > 0 ? `${et.name}: ${detail.join(", ")}` : et.name;
 
@@ -2358,6 +2738,18 @@ export class GameScene extends Phaser.Scene {
     this.eventsResolved += 1;
     this.eventAvailable[idx] = false;
 
+    if (et.workDelta > 0) {
+      const { x, y } = this.boardCellCenter(this.playerGridX, this.playerGridY);
+      let row = (dE !== 0 ? 1 : 0) + (dS !== 0 ? 1 : 0);
+      this.spawnFloater(
+        x,
+        y,
+        `+${et.workDelta} Work`,
+        FLOAT_COLOR_EVENT,
+        -14 * (row > 0 ? row + 1 : 1)
+      );
+    }
+    this.addWork(et.workDelta);
     this.checkRunEndAfterVitals();
 
     const er = this.eventRects[idx];
@@ -2428,7 +2820,8 @@ export class GameScene extends Phaser.Scene {
       playHurtSfx();
     }
     this.spawnEventOutcomeFloaters(dE, dS);
-    this.lastEventResult = `${et.name}: ${choice.label} (${this.formatSigned(choice.energyDelta, "Energy")}, ${this.formatSigned(stressDelta, "Stress")})`;
+    const w = choice.workDelta;
+    this.lastEventResult = `${et.name}: ${choice.label} (${this.formatSigned(choice.energyDelta, "Energy")}, ${this.formatSigned(stressDelta, "Stress")}${w !== 0 ? `, ${this.formatSigned(w, "Work")}` : ""})`;
     console.log("Event resolved");
     this.eventsResolved += 1;
     this.eventAvailable[idx] = false;
@@ -2455,6 +2848,18 @@ export class GameScene extends Phaser.Scene {
       evl.destroy();
       this.eventLabels[idx] = null;
     }
+    if (w > 0) {
+      const { x, y } = this.boardCellCenter(this.playerGridX, this.playerGridY);
+      let row = (dE !== 0 ? 1 : 0) + (dS !== 0 ? 1 : 0);
+      this.spawnFloater(
+        x,
+        y,
+        `+${w} Work`,
+        FLOAT_COLOR_EVENT,
+        -14 * (row > 0 ? row + 1 : 1)
+      );
+    }
+    this.addWork(w);
     this.checkRunEndAfterVitals();
     this.syncTouchLayer();
     this.syncDebugState();
@@ -2484,9 +2889,7 @@ export class GameScene extends Phaser.Scene {
       (this.gameOver || this.gameWon) &&
       Phaser.Input.Keyboard.JustDown(this.keySpace)
     ) {
-      this.runStarted = false;
-      this.stopRunMusic();
-      this.setupRunEntities(true);
+      this.dismissSummaryToTitle();
       return;
     }
 
@@ -2517,24 +2920,62 @@ export class GameScene extends Phaser.Scene {
         this.syncDebugState();
         return;
       }
-      if (Phaser.Input.Keyboard.JustDown(this.keyPerk1)) {
-        const r = tryTitlePerkKey(0);
-        if (r === "no_credits") this.setStatusMessage("Not enough credits");
-        // Do not call setupRunEntities here: it runs setGameSize from a fresh
-        // clientWidth/height probe and can jitter ±1px; perk changes only need UI refresh.
+      if (Phaser.Input.Keyboard.JustDown(this.keyRelicSlotPrev)) {
+        const n = getRelicSlotCount();
+        if (n > 1) {
+          this.titleFocusedRelicSlot =
+            (this.titleFocusedRelicSlot - 1 + n) % n;
+          this.showTitleOverlay();
+          this.syncDebugState();
+        }
+        return;
+      }
+      if (Phaser.Input.Keyboard.JustDown(this.keyRelicSlotNext)) {
+        const n = getRelicSlotCount();
+        if (n > 1) {
+          this.titleFocusedRelicSlot =
+            (this.titleFocusedRelicSlot + 1) % n;
+          this.showTitleOverlay();
+          this.syncDebugState();
+        }
+        return;
+      }
+      if (Phaser.Input.Keyboard.JustDown(this.keyRelicSlotClear)) {
+        clearRelicSlot(this.titleFocusedRelicSlot);
         this.showTitleOverlay();
         this.syncDebugState();
         return;
       }
-      if (Phaser.Input.Keyboard.JustDown(this.keyPerk2)) {
-        const r = tryTitlePerkKey(1);
+      if (Phaser.Input.Keyboard.JustDown(this.keyRelicSlotUnlock)) {
+        const wins = getSessionStatsForDebug().wins;
+        const ur = tryUnlockNextRelicSlot(wins);
+        if (ur === "not_enough_credits") {
+          this.setStatusMessage("Not enough credits for slot");
+        } else if (ur === "milestone_not_met") {
+          this.setStatusMessage("Need more wins for next slot");
+        } else if (ur === "max_slots") {
+          this.setStatusMessage("All relic slots unlocked");
+        }
+        this.showTitleOverlay();
+        this.syncDebugState();
+        return;
+      }
+      if (Phaser.Input.Keyboard.JustDown(this.keyRelicCatalog1)) {
+        const r = tryAssignRelicToSlot(0, this.titleFocusedRelicSlot);
         if (r === "no_credits") this.setStatusMessage("Not enough credits");
         this.showTitleOverlay();
         this.syncDebugState();
         return;
       }
-      if (Phaser.Input.Keyboard.JustDown(this.keyPerk3)) {
-        const r = tryTitlePerkKey(2);
+      if (Phaser.Input.Keyboard.JustDown(this.keyRelicCatalog2)) {
+        const r = tryAssignRelicToSlot(1, this.titleFocusedRelicSlot);
+        if (r === "no_credits") this.setStatusMessage("Not enough credits");
+        this.showTitleOverlay();
+        this.syncDebugState();
+        return;
+      }
+      if (Phaser.Input.Keyboard.JustDown(this.keyRelicCatalog3)) {
+        const r = tryAssignRelicToSlot(2, this.titleFocusedRelicSlot);
         if (r === "no_credits") this.setStatusMessage("Not enough credits");
         this.showTitleOverlay();
         this.syncDebugState();

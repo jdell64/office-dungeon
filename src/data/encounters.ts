@@ -262,39 +262,3 @@ export type ResolvedEncounterChoice = {
   statusMessage?: string;
   label: string;
 };
-
-/**
- * Apply equipped perk tweaks to a single choice before difficulty scaling (stress scaled later in GameScene).
- * - Extra Coffee: +1 energy when the choice already gains energy (>0).
- * - Calm Mind: stress gains from this choice reduced by 1 (floor 0).
- * - Aggressive Reply: +1 credits on choices tagged `aggressive`.
- */
-export function resolveEncounterChoiceWithPerks(
-  choice: EncounterChoiceDef,
-  equippedPerkId: string | null | undefined
-): ResolvedEncounterChoice {
-  let energyDelta = choice.energyDelta;
-  let stressDelta = choice.stressDelta;
-  let creditsDelta = choice.creditsDelta;
-
-  if (equippedPerkId === "extra_coffee" && energyDelta > 0) {
-    energyDelta += 1;
-  }
-  if (equippedPerkId === "calm_mind" && stressDelta > 0) {
-    stressDelta = Math.max(0, stressDelta - 1);
-  }
-  if (
-    equippedPerkId === "aggressive_reply" &&
-    choice.perkTag === "aggressive"
-  ) {
-    creditsDelta += 1;
-  }
-
-  return {
-    label: choice.label,
-    energyDelta,
-    stressDelta,
-    creditsDelta,
-    statusMessage: choice.statusMessage,
-  };
-}

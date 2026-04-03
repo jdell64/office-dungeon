@@ -22,6 +22,8 @@ export type GameDebugState = {
   layout: { id: string; index: number; name: string };
   playerPosition: { x: number; y: number };
   playerEnergy: number;
+  /** Current run energy ceiling (layout + difficulty + relics). */
+  playerEnergyMax: number;
   playerStress: number;
   enemies: Array<{
     name: string;
@@ -62,15 +64,22 @@ export type GameDebugState = {
   /** Set when `gameOver` is true. */
   gameOverReason: "burnout" | "no_energy" | null;
   gameWon: boolean;
+  /** Run goal: complete enough tasks to reach `workTarget`. */
+  workDone: number;
+  workTarget: number;
   runStats: {
     enemiesDefeated: number;
     eventsResolved: number;
+    /** Successful moves this run (grid steps). */
+    turnsTaken: number;
   };
   latestMessage: string;
   meta: {
     officeCredits: number;
-    equippedPerkId: string | null;
-    unlockedPerkIds: string[];
+    equippedRelicIds: (string | null)[];
+    unlockedRelicIds: string[];
+    relicSlotCount: number;
+    titleFocusedRelicSlot: number;
     creditsEarnedThisRun: number;
     metaLoadedFromStorage?: boolean;
     activeRunModifiers?: {
