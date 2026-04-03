@@ -24,12 +24,6 @@ type PersistedShapeV2 = {
   equippedRelicIds: (string | null)[];
 };
 
-type PersistedShapeV1 = {
-  officeCredits: number;
-  unlockedPerkIds: string[];
-  equippedPerkId: string | null;
-};
-
 function isPlainObject(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
 }

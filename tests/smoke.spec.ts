@@ -2,6 +2,8 @@ import { expect, test, type Page } from "@playwright/test";
 
 /** Must match OFFICE_DUNGEON_META_KEY in src/meta/metaStorage.ts */
 const OFFICE_DUNGEON_META_KEY = "office-dungeon-meta-v2";
+/** Legacy meta key — remove with v2 so migration does not resurrect old saves. */
+const OFFICE_DUNGEON_META_KEY_V1 = "office-dungeon-meta-v1";
 
 /** Must match OFFICE_DUNGEON_MONETIZATION_KEY in src/meta/monetizationStorage.ts */
 const OFFICE_DUNGEON_MONETIZATION_KEY = "office-dungeon-monetization-v1";
@@ -16,7 +18,6 @@ type GameState = {
     | "event"
     | "gameOver"
     | "victory";
-  difficulty: "easy" | "normal" | "hard";
   touchUi: {
     movement: boolean;
     event: boolean;
@@ -109,7 +110,8 @@ function enemyAt(
 /** Avoids parallel-test races where the scene has not published __gameState yet. */
 async function focusGameAndWaitForState(page: Page): Promise<void> {
   await expect(page.locator("#game-root canvas")).toBeVisible();
-  await page.locator("#game-root canvas").click();
+  /** Top-left: center hits the middle relic catalog button (Calm Mind) on title. */
+  await page.locator("#game-root canvas").click({ position: { x: 4, y: 4 } });
   await page.waitForFunction(
     () => {
       const w = window as Window & { __gameState?: GameState };
@@ -120,7 +122,13 @@ async function focusGameAndWaitForState(page: Page): Promise<void> {
 }
 
 async function startRun(page: Page): Promise<void> {
-  await page.keyboard.press("Space", { delay: 25 });
+  await page.waitForFunction(() => {
+    const w = window as Window & { __odE2e?: OdE2e };
+    return w.__odE2e != null;
+  }, { timeout: 30000 });
+  await page.evaluate(() => {
+    (window as Window & { __odE2e?: OdE2e }).__odE2e?.pressStart();
+  });
   await page.waitForFunction(
     () => {
       const s = (window as Window & { __gameState?: GameState }).__gameState;
@@ -139,6 +147,13 @@ type OdE2e = {
   setStressForTest: (n: number) => void;
   setEnergyForTest: (n: number, uncapped?: boolean) => void;
   rewardedContinue: () => void;
+  titleAssignRelic: (catalogIndex: number) => void;
+  titleEquipRelicByIdForTest: (relicId: string) => void;
+  titleSelectRelicSlot: (slotIndex: number) => void;
+  titleClearFocusedSlot: () => void;
+  titleUnlockSlot: () => void;
+  clearMetaState: () => void;
+  togglePremiumDev: () => void;
 };
 
 const ARROW_TO_STEP: Record<
@@ -469,20 +484,28 @@ function expectEnergyAfterCoworkerWalk(
 
 async function clearMetaStorageAndGotoOD(page: Page): Promise<void> {
   await page.goto(OD);
-  await page.evaluate((key) => localStorage.removeItem(key), OFFICE_DUNGEON_META_KEY);
+  await page.evaluate(
+    ([k2, k1]) => {
+      localStorage.removeItem(k2);
+      localStorage.removeItem(k1);
+    },
+    [OFFICE_DUNGEON_META_KEY, OFFICE_DUNGEON_META_KEY_V1] as [string, string]
+  );
   await page.goto(OD);
   await focusGameAndWaitForState(page);
 }
 
 async function returnToTitleAfterVictory(page: Page): Promise<void> {
-  await page.keyboard.press("r", { delay: 25 });
+  await page.evaluate(() => {
+    (window as Window & { __odE2e?: OdE2e }).__odE2e?.restartRun();
+  });
   await page.waitForFunction(() => {
     const s = (window as Window & { __gameState?: GameState }).__gameState;
     return s?.screenState === "title";
   }, { timeout: 5000 });
 }
 
-test("smoke: starts on title; Space moves to running (window.__gameState)", async ({
+test("smoke: starts on title; Start moves to running (window.__gameState)", async ({
   page,
 }) => {
   await page.goto(OD);
@@ -536,36 +559,6 @@ test("smoke: M toggles audio.muted in __gameState", async ({ page }) => {
     () => {
       const s = (window as Window & { __gameState?: GameState }).__gameState;
       return s?.audio?.muted === false;
-    },
-    { timeout: 5000 }
-  );
-});
-
-test("smoke: title difficulty defaults normal; ] cycles in __gameState", async ({
-  page,
-}) => {
-  await page.goto(OD);
-  await focusGameAndWaitForState(page);
-
-  const initial = await page.evaluate(() => {
-    return (window as Window & { __gameState?: GameState }).__gameState;
-  });
-  expect(initial?.difficulty).toBe("normal");
-
-  await page.keyboard.press("]", { delay: 25 });
-  await page.waitForFunction(
-    () => {
-      const s = (window as Window & { __gameState?: GameState }).__gameState;
-      return s?.difficulty === "hard";
-    },
-    { timeout: 5000 }
-  );
-
-  await page.keyboard.press("[", { delay: 25 });
-  await page.waitForFunction(
-    () => {
-      const s = (window as Window & { __gameState?: GameState }).__gameState;
-      return s?.difficulty === "normal";
     },
     { timeout: 5000 }
   );
@@ -807,7 +800,7 @@ test("smoke: work target sets gameWon and disables movement", async ({
     new RegExp(`Total Office Credits:\\s*${won!.meta.officeCredits}`)
   );
   await expect(page.locator("#summary-test-mirror")).toContainText(
-    /Press any key or tap here to continue/
+    /Tap here or Restart below to continue/
   );
 
   await page.keyboard.press("ArrowLeft", { delay: 25 });
@@ -817,7 +810,7 @@ test("smoke: work target sets gameWon and disables movement", async ({
   expect(afterKey!.playerPosition).toEqual({ x: 1, y: 5 });
 });
 
-test("smoke: R key restarts run after win and movement works again", async ({
+test("smoke: summary dismiss restarts run after win and movement works again", async ({
   page,
 }) => {
   await page.goto(OD);
@@ -862,7 +855,9 @@ test("smoke: R key restarts run after win and movement works again", async ({
     /Work Day Complete/
   );
 
-  await page.keyboard.press("r", { delay: 25 });
+  await page.evaluate(() => {
+    (window as Window & { __odE2e?: OdE2e }).__odE2e?.restartRun();
+  });
   await page.waitForFunction(() => {
     const s = (window as Window & { __gameState?: GameState }).__gameState;
     return (
@@ -1022,10 +1017,10 @@ test("smoke: run summary after game over shows stats and Result Game Over", asyn
     /Continue:\s*available/
   );
   await expect(page.locator("#summary-test-mirror")).toContainText(
-    /Press Enter — Continue \(Ad\)/
+    /Tap Continue — Continue \(Ad\)/
   );
   await expect(page.locator("#summary-test-mirror")).toContainText(
-    /Press any key or tap here to continue/
+    /Tap here or Restart below to continue/
   );
 });
 
@@ -1214,7 +1209,9 @@ test("meta: unlocked perk and equip state restored after reload", async ({
   expect(creditsBeforeCalmMind).toBeGreaterThanOrEqual(5);
 
   await page.locator("#game-root canvas").click();
-  await page.keyboard.press("2", { delay: 25 });
+  await page.evaluate(() => {
+    (window as Window & { __odE2e?: OdE2e }).__odE2e?.titleAssignRelic(1);
+  });
   await page.waitForFunction(() => {
     const s = (window as Window & { __gameState?: GameState }).__gameState;
     return (
@@ -1253,13 +1250,17 @@ test("meta: C on title clears save and resets progression", async ({ page }) => 
     return s?.gameWon === true;
   }, { timeout: 5000 });
 
-  await page.keyboard.press("r", { delay: 25 });
+  await page.evaluate(() => {
+    (window as Window & { __odE2e?: OdE2e }).__odE2e?.restartRun();
+  });
   await page.waitForFunction(() => {
     const s = (window as Window & { __gameState?: GameState }).__gameState;
     return s?.screenState === "title" && (s.meta.officeCredits ?? 0) >= 2;
   }, { timeout: 5000 });
 
-  await page.keyboard.press("c", { delay: 25 });
+  await page.evaluate(() => {
+    (window as Window & { __odE2e?: OdE2e }).__odE2e?.clearMetaState();
+  });
   await page.waitForFunction(() => {
     const s = (window as Window & { __gameState?: GameState }).__gameState;
     return (
@@ -1279,7 +1280,7 @@ test("meta: C on title clears save and resets progression", async ({ page }) => 
   expect(cleared?.meta.metaLoadedFromStorage).toBe(false);
 });
 
-test("meta: unlock Calm Mind with credits, re-equip Extra Coffee with key 1", async ({
+test("meta: unlock Calm Mind with credits, re-equip Extra Coffee via __odE2e", async ({
   page,
 }) => {
   await clearMetaStorageAndGotoOD(page);
@@ -1305,7 +1306,9 @@ test("meta: unlock Calm Mind with credits, re-equip Extra Coffee with key 1", as
   expect(creditsBeforeSlot2).toBeGreaterThanOrEqual(5);
 
   await page.locator("#game-root canvas").click();
-  await page.keyboard.press("2", { delay: 25 });
+  await page.evaluate(() => {
+    (window as Window & { __odE2e?: OdE2e }).__odE2e?.titleAssignRelic(1);
+  });
   await page.waitForFunction(() => {
     const s = (window as Window & { __gameState?: GameState }).__gameState;
     return (
@@ -1320,7 +1323,9 @@ test("meta: unlock Calm Mind with credits, re-equip Extra Coffee with key 1", as
   });
   expect(creditsAfterSlot2).toBe(creditsBeforeSlot2! - 5);
 
-  await page.keyboard.press("1", { delay: 25 });
+  await page.evaluate(() => {
+    (window as Window & { __odE2e?: OdE2e }).__odE2e?.titleAssignRelic(0);
+  });
   await page.waitForFunction(() => {
     const s = (window as Window & { __gameState?: GameState }).__gameState;
     return s?.meta.equippedRelicIds[0] === "extra_coffee";
@@ -1331,7 +1336,13 @@ test("meta: Aggressive Reply — Executive Row encounter energy outcome", async 
   page,
 }) => {
   await page.goto("/?eventRandom=0&layout=2");
-  await page.evaluate((key) => localStorage.removeItem(key), OFFICE_DUNGEON_META_KEY);
+  await page.evaluate(
+    ([k2, k1]) => {
+      localStorage.removeItem(k2);
+      localStorage.removeItem(k1);
+    },
+    [OFFICE_DUNGEON_META_KEY, OFFICE_DUNGEON_META_KEY_V1] as [string, string]
+  );
   await page.goto("/?eventRandom=0&layout=2");
   await focusGameAndWaitForState(page);
   await startRun(page);
@@ -1359,10 +1370,15 @@ test("meta: Aggressive Reply — Executive Row encounter energy outcome", async 
   await page.goto("/?eventRandom=0&layout=0");
   await focusGameAndWaitForState(page);
 
-  await page.keyboard.press("3", { delay: 25 });
+  await page.evaluate(() => {
+    (window as Window & { __odE2e?: OdE2e }).__odE2e?.titleEquipRelicByIdForTest(
+      "aggressive_reply"
+    );
+  });
   await page.waitForFunction(() => {
     const s = (window as Window & { __gameState?: GameState }).__gameState;
     return (
+      s?.screenState === "title" &&
       s?.meta.equippedRelicIds[0] === "aggressive_reply" &&
       s.meta.unlockedRelicIds.includes("aggressive_reply")
     );
@@ -1549,7 +1565,9 @@ test("smoke: P toggles premium and persists in localStorage", async ({
   await page.reload();
   await focusGameAndWaitForState(page);
 
-  await page.keyboard.press("p", { delay: 25 });
+  await page.evaluate(() => {
+    (window as Window & { __odE2e?: OdE2e }).__odE2e?.togglePremiumDev();
+  });
   await page.waitForFunction(() => {
     const s = (window as Window & { __gameState?: GameState }).__gameState;
     return s?.monetization?.premiumEnabled === true;
@@ -1566,7 +1584,9 @@ test("smoke: P toggles premium and persists in localStorage", async ({
   });
   expect(afterReload?.monetization.premiumEnabled).toBe(true);
 
-  await page.keyboard.press("p", { delay: 25 });
+  await page.evaluate(() => {
+    (window as Window & { __odE2e?: OdE2e }).__odE2e?.togglePremiumDev();
+  });
   await page.waitForFunction(() => {
     const s = (window as Window & { __gameState?: GameState }).__gameState;
     return s?.monetization?.premiumEnabled === false;
@@ -1642,7 +1662,7 @@ test("smoke: rewarded continue restores run and allows only one use per run", as
   }, { timeout: 5000 });
 
   await expect(page.getByText(/Continue:\s*used this run/)).toBeVisible();
-  await expect(page.getByText(/^Press Enter/)).toHaveCount(0);
+  await expect(page.getByText(/^Tap Continue/)).toHaveCount(0);
 });
 
 test("smoke: premium summary shows Continue without Ad label", async ({
@@ -1685,6 +1705,6 @@ test("smoke: premium summary shows Continue without Ad label", async ({
   });
   expect(lost!.monetization.premiumEnabled).toBe(true);
   const summaryMirror = await page.locator("#summary-test-mirror").textContent();
-  expect(summaryMirror).toContain("Press Enter — Continue");
+  expect(summaryMirror).toContain("Tap Continue — Continue");
   expect(summaryMirror).not.toContain("Continue (Ad)");
 });

@@ -1,5 +1,3 @@
-import type { Difficulty } from "../game/difficulty";
-
 export type ScreenState =
   | "title"
   | "running"
@@ -17,12 +15,11 @@ export type TouchUiDebug = {
 
 export type GameDebugState = {
   screenState: ScreenState;
-  difficulty: Difficulty;
   touchUi: TouchUiDebug;
   layout: { id: string; index: number; name: string };
   playerPosition: { x: number; y: number };
   playerEnergy: number;
-  /** Current run energy ceiling (layout + difficulty + relics). */
+  /** Current run energy ceiling (layout + relics). */
   playerEnergyMax: number;
   playerStress: number;
   enemies: Array<{

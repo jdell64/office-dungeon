@@ -39,6 +39,7 @@ import {
   MAX_RELIC_SLOTS,
   RELIC_SLOT_UNLOCK_RULES,
   RELICS,
+  RELICS_TITLE_CATALOG,
   aggregatedDamageBonus,
   aggregatedStartEnergyBonus,
   aggregatedStartStressReduction,
@@ -61,6 +62,7 @@ import {
   getUnlockedRelicIds,
   tryAssignRelicToSlot,
   tryUnlockNextRelicSlot,
+  e2eTitleEquipRelicById,
 } from "../meta/sessionMeta";
 import {
   getPremiumNoAdsEnabled,
@@ -71,15 +73,6 @@ import {
   recordRunEnded,
   recordRunStarted,
 } from "../meta/sessionStats";
-import {
-  cycleDifficulty,
-  difficultyHudIcon,
-  difficultyLabel,
-  energyBonus,
-  scaledEnemyDamage,
-  scaledStressGain,
-  type Difficulty,
-} from "../game/difficulty";
 import { uiTextStyle } from "../ui/uiText";
 
 const PLAYER_PADDING = 7;
@@ -163,6 +156,12 @@ const TOUCH_STROKE_WIDTH = 1;
 const TOUCH_STROKE_ALPHA = 0.85;
 const COLOR_TOUCH_BG = 0x3a3a55;
 const COLOR_TOUCH_STROKE = 0x6e6e8a;
+/** Title loadout slot boxes (touch). */
+const TITLE_SLOT_BOX_W = 96;
+const TITLE_SLOT_BOX_H = 76;
+/** Title relic catalog tiles (icon + name + blurb). */
+const TITLE_RELIC_CAT_H = 92;
+const TITLE_UI_DEPTH = TOUCH_UI_DEPTH;
 
 /**
  * Screen layout: three vertical zones (header / board / footer).
@@ -252,37 +251,25 @@ export class GameScene extends Phaser.Scene {
   private playerGridX = 0;
   private playerGridY = 0;
   private cursors!: Phaser.Types.Input.Keyboard.CursorKeys;
-  private keyRestart!: Phaser.Input.Keyboard.Key;
-  private keySpace!: Phaser.Input.Keyboard.Key;
   private keyY!: Phaser.Input.Keyboard.Key;
   private keyN!: Phaser.Input.Keyboard.Key;
   private keyB!: Phaser.Input.Keyboard.Key;
-  private keyRelicCatalog1!: Phaser.Input.Keyboard.Key;
-  private keyRelicCatalog2!: Phaser.Input.Keyboard.Key;
-  private keyRelicCatalog3!: Phaser.Input.Keyboard.Key;
-  private keyRelicSlotPrev!: Phaser.Input.Keyboard.Key;
-  private keyRelicSlotNext!: Phaser.Input.Keyboard.Key;
-  private keyRelicSlotClear!: Phaser.Input.Keyboard.Key;
-  private keyRelicSlotUnlock!: Phaser.Input.Keyboard.Key;
   /** Title loadout: focused slot index (not persisted). */
   private titleFocusedRelicSlot = 0;
-  private keyClearSave!: Phaser.Input.Keyboard.Key;
-  private keyBracketLeft!: Phaser.Input.Keyboard.Key;
-  private keyBracketRight!: Phaser.Input.Keyboard.Key;
-  private keyPremiumToggle!: Phaser.Input.Keyboard.Key;
   private keyContinueReward!: Phaser.Input.Keyboard.Key;
   /** Looping run music; stopped on title. */
   private bgmMusic: Phaser.Sound.BaseSound | null = null;
   private audioUnlocked = false;
   /** M-key mute; source of truth for `__gameState.audio` and SFX gating in soundHooks. */
   private sessionAudioMuted = false;
-  private selectedDifficulty: Difficulty = "normal";
   private runStarted = false;
   /** `performance.now()` when the current run started; null on title / after reset. */
   private runStartTime: number | null = null;
   /** Ensures session stats record win/loss once per finished run. */
   private sessionMetricsRecordedForRun = false;
   private titleTexts: Phaser.GameObjects.Text[] = [];
+  /** Title loadout: buttons/boxes destroyed with overlay. */
+  private titleUiObjects: Phaser.GameObjects.GameObject[] = [];
   private titleBackdrop: Phaser.GameObjects.Graphics | null = null;
   private gameOver = false;
   private gameWon = false;
@@ -513,9 +500,8 @@ export class GameScene extends Phaser.Scene {
     if (sRed > 0) {
       stress = Math.max(0, stress - sRed);
     }
-    const diffEnergy = energyBonus(this.selectedDifficulty);
-    energy = Math.max(1, energy + diffEnergy);
-    this.effectiveMaxEnergy = Math.max(1, this.effectiveMaxEnergy + diffEnergy);
+    energy = Math.max(1, energy);
+    this.effectiveMaxEnergy = Math.max(1, this.effectiveMaxEnergy);
     return { startEnergy: energy, startStress: stress };
   }
 
@@ -629,8 +615,8 @@ export class GameScene extends Phaser.Scene {
   private formatHudRelicsShort(): string | null {
     const ids = getEquippedRelicIds();
     if (ids.length === 0) return null;
-    const icons = ids.map((id) => getRelicById(id)?.icon ?? "?").join("");
-    if (icons.length <= 6) return icons;
+    const icons = ids.map((id) => getRelicById(id)?.icon ?? "?").join(" ");
+    if (icons.length <= 12) return icons;
     return `${ids.length} relics`;
   }
 
@@ -709,7 +695,7 @@ export class GameScene extends Phaser.Scene {
   }
 
   private formatEventChoiceButtonText(choice: EventChoiceDef): string {
-    const stress = scaledStressGain(choice.stressDelta, this.selectedDifficulty);
+    const stress = choice.stressDelta;
     const line2 = this.formatInteractionOutcomeParts(
       choice.energyDelta,
       stress,
@@ -721,10 +707,7 @@ export class GameScene extends Phaser.Scene {
   private formatEncounterChoiceButtonText(
     resolved: ResolvedEncounterChoice
   ): string {
-    const stress = scaledStressGain(
-      resolved.stressDelta,
-      this.selectedDifficulty
-    );
+    const stress = resolved.stressDelta;
     const parts: string[] = [];
     if (resolved.energyDelta !== 0) {
       parts.push(this.formatSigned(resolved.energyDelta, "energy"));
@@ -1126,6 +1109,49 @@ export class GameScene extends Phaser.Scene {
     return { hit, text };
   }
 
+  /** Interactive title overlay control (destroyed in `hideTitleOverlay`). */
+  private addTitleLoadoutButton(
+    x: number,
+    y: number,
+    w: number,
+    h: number,
+    label: string,
+    onPress: () => void,
+    opts?: {
+      focused?: boolean;
+      fontSize?: string;
+      color?: string;
+      lineSpacing?: number;
+    }
+  ): void {
+    const hit = this.add.rectangle(x, y, w, h, COLOR_TOUCH_BG, TOUCH_FILL_ALPHA);
+    hit.setStrokeStyle(
+      TOUCH_STROKE_WIDTH,
+      opts?.focused ? 0x88aaee : COLOR_TOUCH_STROKE,
+      opts?.focused ? 1 : TOUCH_STROKE_ALPHA
+    );
+    hit.setScrollFactor(0, 0);
+    hit.setDepth(TITLE_UI_DEPTH);
+    hit.setInteractive({ useHandCursor: true });
+    hit.on("pointerdown", onPress);
+    const text = this.add.text(
+      x,
+      y,
+      label,
+      uiTextStyle({
+        fontSize: opts?.fontSize ?? "11px",
+        color: opts?.color ?? "#e8e8ff",
+        align: "center",
+        wordWrap: { width: Math.max(40, w - 10) },
+      })
+    );
+    text.setOrigin(0.5);
+    if (opts?.lineSpacing != null) text.setLineSpacing(opts.lineSpacing);
+    text.setScrollFactor(0, 0);
+    text.setDepth(TITLE_UI_DEPTH + 0.1);
+    this.titleUiObjects.push(hit, text);
+  }
+
   private createTouchControlsOnce(): void {
     if (this.touchLayerReady) return;
 
@@ -1280,6 +1306,58 @@ export class GameScene extends Phaser.Scene {
           this.performRewardedContinue();
         }
       },
+      titleAssignRelic: (catalogIndex: number) => {
+        if (this.runStarted) return;
+        const r = tryAssignRelicToSlot(catalogIndex, this.titleFocusedRelicSlot);
+        if (r === "no_credits") this.setStatusMessage("Not enough credits");
+        this.showTitleOverlay();
+        this.syncDebugState();
+      },
+      titleEquipRelicByIdForTest: (relicId: string) => {
+        if (this.runStarted) return;
+        e2eTitleEquipRelicById(relicId, this.titleFocusedRelicSlot);
+        this.showTitleOverlay();
+        this.syncDebugState();
+      },
+      titleSelectRelicSlot: (slotIndex: number) => {
+        if (this.runStarted) return;
+        const n = getRelicSlotCount();
+        if (slotIndex < 0 || slotIndex >= n) return;
+        this.titleFocusedRelicSlot = slotIndex;
+        this.showTitleOverlay();
+        this.syncDebugState();
+      },
+      titleClearFocusedSlot: () => {
+        if (this.runStarted) return;
+        clearRelicSlot(this.titleFocusedRelicSlot);
+        this.showTitleOverlay();
+        this.syncDebugState();
+      },
+      titleUnlockSlot: () => {
+        if (this.runStarted) return;
+        const wins = getSessionStatsForDebug().wins;
+        const ur = tryUnlockNextRelicSlot(wins);
+        if (ur === "not_enough_credits") {
+          this.setStatusMessage("Not enough credits for slot");
+        } else if (ur === "milestone_not_met") {
+          this.setStatusMessage("Need more wins for next slot");
+        } else if (ur === "max_slots") {
+          this.setStatusMessage("All relic slots unlocked");
+        }
+        this.showTitleOverlay();
+        this.syncDebugState();
+      },
+      clearMetaState: () => {
+        clearMetaState();
+        this.setStatusMessage("Save cleared");
+        this.showTitleOverlay();
+        this.syncDebugState();
+      },
+      togglePremiumDev: () => {
+        setPremiumNoAdsEnabled(!getPremiumNoAdsEnabled());
+        this.showTitleOverlay();
+        this.syncDebugState();
+      },
     };
   }
 
@@ -1302,13 +1380,14 @@ export class GameScene extends Phaser.Scene {
       getEncounterById(
         this.enemyRuntimeEncounterIds[this.activeEncounterEnemyIndex]!
       ).choices.length > 2;
+    /** Split row evenly; do not force a min width — that clips the right column on narrow `scale.width`. */
     const evW2 = Math.min(
       184,
-      Math.max(88, Math.floor((usableW - evGap) / 2))
+      Math.max(1, Math.floor((usableW - evGap) / 2))
     );
     const evW3 = Math.min(
       140,
-      Math.max(76, Math.floor((usableW - evGap * 2) / 3))
+      Math.max(1, Math.floor((usableW - evGap * 2) / 3))
     );
     const evW = threeChoiceEncounter ? evW3 : evW2;
     const leftCx = TOUCH_EDGE_INSET + evW / 2;
@@ -1533,48 +1612,9 @@ export class GameScene extends Phaser.Scene {
     this.currentLayoutIndex = this.pickLayoutIndexForNewRun();
 
     this.cursors = this.input.keyboard!.createCursorKeys();
-    this.keyRestart = this.input.keyboard!.addKey(
-      Phaser.Input.Keyboard.KeyCodes.R
-    );
-    this.keySpace = this.input.keyboard!.addKey(
-      Phaser.Input.Keyboard.KeyCodes.SPACE
-    );
     this.keyY = this.input.keyboard!.addKey(Phaser.Input.Keyboard.KeyCodes.Y);
     this.keyN = this.input.keyboard!.addKey(Phaser.Input.Keyboard.KeyCodes.N);
     this.keyB = this.input.keyboard!.addKey(Phaser.Input.Keyboard.KeyCodes.B);
-    this.keyRelicCatalog1 = this.input.keyboard!.addKey(
-      Phaser.Input.Keyboard.KeyCodes.ONE
-    );
-    this.keyRelicCatalog2 = this.input.keyboard!.addKey(
-      Phaser.Input.Keyboard.KeyCodes.TWO
-    );
-    this.keyRelicCatalog3 = this.input.keyboard!.addKey(
-      Phaser.Input.Keyboard.KeyCodes.THREE
-    );
-    this.keyRelicSlotPrev = this.input.keyboard!.addKey(
-      Phaser.Input.Keyboard.KeyCodes.COMMA
-    );
-    this.keyRelicSlotNext = this.input.keyboard!.addKey(
-      Phaser.Input.Keyboard.KeyCodes.PERIOD
-    );
-    this.keyRelicSlotClear = this.input.keyboard!.addKey(
-      Phaser.Input.Keyboard.KeyCodes.ZERO
-    );
-    this.keyRelicSlotUnlock = this.input.keyboard!.addKey(
-      Phaser.Input.Keyboard.KeyCodes.U
-    );
-    this.keyClearSave = this.input.keyboard!.addKey(
-      Phaser.Input.Keyboard.KeyCodes.C
-    );
-    this.keyBracketLeft = this.input.keyboard!.addKey(
-      Phaser.Input.Keyboard.KeyCodes.OPEN_BRACKET
-    );
-    this.keyBracketRight = this.input.keyboard!.addKey(
-      Phaser.Input.Keyboard.KeyCodes.CLOSED_BRACKET
-    );
-    this.keyPremiumToggle = this.input.keyboard!.addKey(
-      Phaser.Input.Keyboard.KeyCodes.P
-    );
     this.keyContinueReward = this.input.keyboard!.addKey(
       Phaser.Input.Keyboard.KeyCodes.ENTER
     );
@@ -1706,11 +1746,8 @@ export class GameScene extends Phaser.Scene {
     this.enemies = layout.enemies.map((pl) => {
       const t = getEnemyType(pl.typeId);
       return new Enemy(t, pl.grid.x, pl.grid.y, {
-        damage: scaledEnemyDamage(t.damage, this.selectedDifficulty),
-        stressPerHit: scaledStressGain(
-          t.stressPerHit ?? 0,
-          this.selectedDifficulty
-        ),
+        damage: t.damage,
+        stressPerHit: t.stressPerHit ?? 0,
       });
     });
     this.reward = new Reward(layout.reward.grid.x, layout.reward.grid.y);
@@ -1894,6 +1931,10 @@ export class GameScene extends Phaser.Scene {
   }
 
   private hideTitleOverlay(): void {
+    for (const o of this.titleUiObjects) {
+      o.destroy();
+    }
+    this.titleUiObjects = [];
     this.titleBackdrop?.destroy();
     this.titleBackdrop = null;
     for (const t of this.titleTexts) {
@@ -1963,14 +2004,13 @@ export class GameScene extends Phaser.Scene {
       "",
       `Total Office Credits: ${getOfficeCredits()}`,
       "",
-      "Press any key or tap here to continue (Space / R)",
-      "— or tap Restart below —"
+      "Tap here or Restart below to continue"
     );
     if (this.gameOver) {
       if (!this.continueUsedThisRun) {
         summaryLines.push("", "Continue: available");
         const contLabel = getPremiumNoAdsEnabled() ? "Continue" : "Continue (Ad)";
-        summaryLines.push(`Press Enter — ${contLabel} (resume run)`);
+        summaryLines.push(`Tap Continue — ${contLabel} (resume run)`);
       } else {
         summaryLines.push("", "Continue: used this run");
       }
@@ -2039,7 +2079,6 @@ export class GameScene extends Phaser.Scene {
     this.titleBackdrop = backdrop;
 
     const cx = vw / 2;
-    const cy = vh / 2;
     const compact = this.isCompactViewport();
     const credits = getOfficeCredits();
     const unlocked = new Set(getUnlockedRelicIds());
@@ -2050,137 +2089,190 @@ export class GameScene extends Phaser.Scene {
       Math.min(this.titleFocusedRelicSlot, Math.max(0, slotCount - 1))
     );
     const st = getSessionStatsForDebug();
-    const avgPart =
-      st.runsCompleted > 0 && st.averageRunLengthSeconds > 0
-        ? ` · avg ${st.averageRunLengthSeconds}s`
-        : "";
-    const lines: { text: string; fontSize: string; y: number }[] = [
-      {
-        text: "Office Dungeon",
-        fontSize: compact ? "20px" : "26px",
-        y: compact ? -118 : -132,
-      },
-      {
-        text: "Survive the workday.",
-        fontSize: compact ? "12px" : "14px",
-        y: compact ? -92 : -100,
-      },
-      {
-        text: `Office Credits: ${credits}`,
-        fontSize: compact ? "12px" : "14px",
-        y: compact ? -72 : -74,
-      },
-      {
-        text: `Session: ${st.runsStarted} started · W ${st.wins} / L ${st.losses}${avgPart}`,
-        fontSize: compact ? "11px" : "12px",
-        y: compact ? -56 : -58,
-      },
-      {
-        text: `Difficulty: ${difficultyHudIcon(this.selectedDifficulty)} ${difficultyLabel(this.selectedDifficulty)} — [ ] to cycle`,
-        fontSize: compact ? "11px" : "12px",
-        y: compact ? -40 : -42,
-      },
-    ];
-    let y = compact ? -28 : -32;
-    const smallFs = compact ? "11px" : "12px";
-    lines.push({
-      text: `Relics — ${slotCount}/${MAX_RELIC_SLOTS} slots · focus ${this.titleFocusedRelicSlot + 1} (, .) · 0 clear · U unlock`,
-      fontSize: smallFs,
-      y,
-    });
-    y += compact ? 15 : 17;
+
+    let py = compact ? 20 : 28;
+    const pushLine = (text: string, fontSize: string): void => {
+      const t = this.add.text(
+        cx,
+        py,
+        text,
+        uiTextStyle({
+          fontSize,
+          color: "#e8e8ff",
+          align: "center",
+        })
+      );
+      t.setOrigin(0.5, 0);
+      t.setScrollFactor(0, 0);
+      t.setDepth(TITLE_DEPTH);
+      this.titleTexts.push(t);
+      py += compact ? 20 : 24;
+    };
+    pushLine("Office Dungeon", compact ? "20px" : "26px");
+    pushLine("Survive the workday.", compact ? "12px" : "14px");
+    pushLine(`💰 ${credits}`, compact ? "12px" : "14px");
+
+    py += 8;
+
+    pushLine(
+      `Loadout (${slotCount}/${MAX_RELIC_SLOTS} slots) — tap a slot, then a relic`,
+      compact ? "9px" : "10px"
+    );
+    py += 12;
+
+    const slotGap = 8;
+    const totalSlotW =
+      slotCount * TITLE_SLOT_BOX_W + (slotCount - 1) * slotGap;
+    const slotY = py + TITLE_SLOT_BOX_H / 2;
+    const slotStartX = cx - totalSlotW / 2 + TITLE_SLOT_BOX_W / 2;
     for (let s = 0; s < slotCount; s++) {
       const id = slots[s] ?? null;
       const def = id ? getRelicById(id) : undefined;
-      const label = def ? `${def.icon} ${def.name}` : "— empty —";
-      const focus = s === this.titleFocusedRelicSlot ? "  ◀ focus" : "";
-      lines.push({
-        text: `  Slot ${s + 1}: ${label}${focus}`,
-        fontSize: smallFs,
-        y,
-      });
-      y += compact ? 15 : 17;
+      const label = def ? `${def.icon}\n${def.name}` : "Empty";
+      const sx = slotStartX + s * (TITLE_SLOT_BOX_W + slotGap);
+      this.addTitleLoadoutButton(
+        sx,
+        slotY,
+        TITLE_SLOT_BOX_W,
+        TITLE_SLOT_BOX_H,
+        label,
+        () => {
+          this.titleFocusedRelicSlot = s;
+          this.showTitleOverlay();
+          this.syncDebugState();
+        },
+        {
+          focused: s === this.titleFocusedRelicSlot,
+          fontSize: compact ? "10px" : "11px",
+        }
+      );
     }
+    py = slotY + TITLE_SLOT_BOX_H / 2 + 28;
+
+    this.addTitleLoadoutButton(
+      cx,
+      py,
+      Math.min(200, vw - 32),
+      38,
+      "Clear selected slot",
+      () => {
+        clearRelicSlot(this.titleFocusedRelicSlot);
+        this.showTitleOverlay();
+        this.syncDebugState();
+      },
+      { fontSize: "12px" }
+    );
+    py += 44;
+
+    pushLine("Relics (tap to equip)", compact ? "11px" : "12px");
+    py += 14;
+    const catBoxH = TITLE_RELIC_CAT_H;
+    const catY = py + catBoxH / 2;
+    const catGap = 8;
+    const nCatalog = RELICS_TITLE_CATALOG.length;
+    const catW = Math.min(
+      120,
+      Math.floor(
+        (vw - 2 * TOUCH_EDGE_INSET - Math.max(0, nCatalog - 1) * catGap) /
+          nCatalog
+      )
+    );
+    const catRowW = nCatalog * catW + Math.max(0, nCatalog - 1) * catGap;
+    const catStart = cx - catRowW / 2 + catW / 2;
+    const catFont = compact ? "8px" : "9px";
+    for (let i = 0; i < nCatalog; i++) {
+      const p = RELICS_TITLE_CATALOG[i]!;
+      const isUnlocked = unlocked.has(p.id);
+      const label = isUnlocked
+        ? `${p.icon}\n${p.name}\n${p.blurb}`
+        : `${p.icon}\n${p.name}\n${p.blurb}\n(💰 ${p.cost} to unlock)`;
+      const bx = catStart + i * (catW + catGap);
+      this.addTitleLoadoutButton(
+        bx,
+        catY,
+        catW,
+        catBoxH,
+        label,
+        () => {
+          const r = tryAssignRelicToSlot(i, this.titleFocusedRelicSlot);
+          if (r === "no_credits") this.setStatusMessage("Not enough credits");
+          this.showTitleOverlay();
+          this.syncDebugState();
+        },
+        {
+          fontSize: catFont,
+          color: isUnlocked ? "#e8e8ff" : "#c0c0d8",
+          lineSpacing: 2,
+        }
+      );
+    }
+
+    const catalogBottom = catY + catBoxH / 2;
+    const gapAfterCatalog = 14;
+    let hintPy = catalogBottom + gapAfterCatalog;
+
     if (slotCount < MAX_RELIC_SLOTS) {
       const nextN = slotCount + 1;
       const rule = RELIC_SLOT_UNLOCK_RULES[nextN];
       if (rule) {
-        const ruleStr =
+        const unlockH = 42;
+        const unlockCenterY = catalogBottom + gapAfterCatalog + unlockH / 2;
+        const lbl =
           rule.kind === "credits"
-            ? `${rule.cost} cr`
-            : `${rule.need} wins (have ${st.wins})`;
-        lines.push({
-          text: `  Next slot (${nextN}): need ${ruleStr} — press U`,
-          fontSize: smallFs,
-          y,
-        });
-        y += compact ? 15 : 17;
+            ? `Unlock slot (💰 ${rule.cost})`
+            : `Unlock slot (${rule.need} wins · ${st.wins} so far)`;
+        this.addTitleLoadoutButton(
+          cx,
+          unlockCenterY,
+          Math.min(300, vw - 24),
+          unlockH,
+          lbl,
+          () => {
+            const ur = tryUnlockNextRelicSlot(st.wins);
+            if (ur === "not_enough_credits") {
+              this.setStatusMessage("Not enough credits for slot");
+            } else if (ur === "milestone_not_met") {
+              this.setStatusMessage("Need more wins for next slot");
+            } else if (ur === "max_slots") {
+              this.setStatusMessage("All relic slots unlocked");
+            }
+            this.showTitleOverlay();
+            this.syncDebugState();
+          },
+          { fontSize: "11px" }
+        );
+        hintPy = unlockCenterY + unlockH / 2 + 14;
       }
     }
-    lines.push({
-      text: "Catalog (assign to focused slot):",
-      fontSize: smallFs,
-      y,
-    });
-    y += compact ? 15 : 17;
-    for (let i = 0; i < RELICS.length; i++) {
-      const p = RELICS[i]!;
-      const isUnlocked = unlocked.has(p.id);
-      const inLoadout = slots.includes(p.id);
-      const costStr = `${p.cost} cr`;
-      const state = isUnlocked
-        ? inLoadout
-          ? "In loadout"
-          : "Unlocked"
-        : `Locked · need ${Math.max(0, p.cost - credits)} more`;
-      lines.push({
-        text: `[${i + 1}] ${p.icon} ${p.name} · ${costStr} · ${state}`,
-        fontSize: smallFs,
-        y,
-      });
-      y += compact ? 15 : 17;
-    }
-    y += compact ? 4 : 6;
-    const hintFs = compact ? "11px" : "12px";
-    lines.push({
-      text: "Tap Start (below) or Space — 1–3: assign relic to focused slot",
-      fontSize: hintFs,
-      y,
-    });
-    lines.push({
-      text: "C: clear save (dev)",
-      fontSize: hintFs,
-      y: y + (compact ? 16 : 18),
-    });
-    lines.push({
-      text: "R: restart (new layout)",
-      fontSize: hintFs,
-      y: y + (compact ? 32 : 36),
-    });
-    lines.push({
-      text: `Premium: ${getPremiumNoAdsEnabled() ? "On" : "Off"}`,
-      fontSize: hintFs,
-      y: y + (compact ? 48 : 54),
-    });
-    lines.push({
-      text: "P: toggle premium (dev)",
-      fontSize: hintFs,
-      y: y + (compact ? 64 : 72),
-    });
-    for (const line of lines) {
-      const t = this.add.text(
-        cx,
-        cy + line.y,
-        line.text,
-        uiTextStyle({
-          fontSize: line.fontSize,
-          color: "#e8e8ff",
-        })
-      );
-      t.setOrigin(0.5);
-      t.setScrollFactor(0, 0);
-      t.setDepth(TITLE_DEPTH);
-      this.titleTexts.push(t);
+
+    const hint = this.add.text(
+      cx,
+      hintPy,
+      "Tap Start below to begin",
+      uiTextStyle({
+        fontSize: compact ? "11px" : "12px",
+        color: "#b8b8d8",
+        align: "center",
+      })
+    );
+    hint.setOrigin(0.5, 0);
+    hint.setScrollFactor(0, 0);
+    hint.setDepth(TITLE_DEPTH);
+    this.titleTexts.push(hint);
+
+    const contentBottom = hintPy + 22;
+    const maxBottom = vh - 56;
+    if (contentBottom > maxBottom) {
+      const shift = contentBottom - maxBottom;
+      for (const t of this.titleTexts) {
+        t.setY(t.y - shift);
+      }
+      for (const o of this.titleUiObjects) {
+        if ("setY" in o && typeof (o as Phaser.GameObjects.GameObject & { setY(y: number): void }).setY === "function") {
+          const go = o as Phaser.GameObjects.GameObject & { y: number; setY(v: number): void };
+          go.setY(go.y - shift);
+        }
+      }
     }
   }
 
@@ -2232,7 +2324,6 @@ export class GameScene extends Phaser.Scene {
 
     publishGameDebugState({
       screenState: this.computeScreenState(),
-      difficulty: this.selectedDifficulty,
       touchUi,
       layout: {
         id: layout.id,
@@ -2458,10 +2549,7 @@ export class GameScene extends Phaser.Scene {
       raw,
       getEquippedRelicIds()
     );
-    const stressDelta = scaledStressGain(
-      resolved.stressDelta,
-      this.selectedDifficulty
-    );
+    const stressDelta = resolved.stressDelta;
 
     const energyBefore = this.player.energy;
     const stressBefore = this.player.stress;
@@ -2692,10 +2780,7 @@ export class GameScene extends Phaser.Scene {
 
     let stressExtra = 0;
     if (this.eventStressRollFrac() < et.stressChance) {
-      stressExtra = scaledStressGain(
-        et.stressDeltaIfRoll,
-        this.selectedDifficulty
-      );
+      stressExtra = et.stressDeltaIfRoll;
     }
 
     this.player.energy = Math.max(
@@ -2800,10 +2885,7 @@ export class GameScene extends Phaser.Scene {
     if (!isChoiceEvent(et)) return;
     playEventChoiceSfx();
     const choice = listen ? et.choiceY : et.choiceN;
-    const stressDelta = scaledStressGain(
-      choice.stressDelta,
-      this.selectedDifficulty
-    );
+    const stressDelta = choice.stressDelta;
     const energyBefore = this.player.energy;
     const stressBefore = this.player.stress;
     this.player.energy = Math.max(
@@ -2866,13 +2948,6 @@ export class GameScene extends Phaser.Scene {
   }
 
   update(): void {
-    if (Phaser.Input.Keyboard.JustDown(this.keyRestart)) {
-      this.runStarted = false;
-      this.stopRunMusic();
-      this.setupRunEntities(true);
-      return;
-    }
-
     if (
       this.runStarted &&
       this.gameOver &&
@@ -2881,109 +2956,6 @@ export class GameScene extends Phaser.Scene {
       Phaser.Input.Keyboard.JustDown(this.keyContinueReward)
     ) {
       this.performRewardedContinue();
-      return;
-    }
-
-    if (
-      this.runStarted &&
-      (this.gameOver || this.gameWon) &&
-      Phaser.Input.Keyboard.JustDown(this.keySpace)
-    ) {
-      this.dismissSummaryToTitle();
-      return;
-    }
-
-    if (!this.runStarted) {
-      if (Phaser.Input.Keyboard.JustDown(this.keyPremiumToggle)) {
-        setPremiumNoAdsEnabled(!getPremiumNoAdsEnabled());
-        this.showTitleOverlay();
-        this.syncDebugState();
-        return;
-      }
-      if (Phaser.Input.Keyboard.JustDown(this.keyBracketLeft)) {
-        this.selectedDifficulty = cycleDifficulty(this.selectedDifficulty, -1);
-        this.showTitleOverlay();
-        this.syncDebugState();
-        return;
-      }
-      if (Phaser.Input.Keyboard.JustDown(this.keyBracketRight)) {
-        this.selectedDifficulty = cycleDifficulty(this.selectedDifficulty, 1);
-        this.showTitleOverlay();
-        this.syncDebugState();
-        return;
-      }
-      if (Phaser.Input.Keyboard.JustDown(this.keyClearSave)) {
-        clearMetaState();
-        console.log("Save cleared");
-        this.setStatusMessage("Save cleared");
-        this.showTitleOverlay();
-        this.syncDebugState();
-        return;
-      }
-      if (Phaser.Input.Keyboard.JustDown(this.keyRelicSlotPrev)) {
-        const n = getRelicSlotCount();
-        if (n > 1) {
-          this.titleFocusedRelicSlot =
-            (this.titleFocusedRelicSlot - 1 + n) % n;
-          this.showTitleOverlay();
-          this.syncDebugState();
-        }
-        return;
-      }
-      if (Phaser.Input.Keyboard.JustDown(this.keyRelicSlotNext)) {
-        const n = getRelicSlotCount();
-        if (n > 1) {
-          this.titleFocusedRelicSlot =
-            (this.titleFocusedRelicSlot + 1) % n;
-          this.showTitleOverlay();
-          this.syncDebugState();
-        }
-        return;
-      }
-      if (Phaser.Input.Keyboard.JustDown(this.keyRelicSlotClear)) {
-        clearRelicSlot(this.titleFocusedRelicSlot);
-        this.showTitleOverlay();
-        this.syncDebugState();
-        return;
-      }
-      if (Phaser.Input.Keyboard.JustDown(this.keyRelicSlotUnlock)) {
-        const wins = getSessionStatsForDebug().wins;
-        const ur = tryUnlockNextRelicSlot(wins);
-        if (ur === "not_enough_credits") {
-          this.setStatusMessage("Not enough credits for slot");
-        } else if (ur === "milestone_not_met") {
-          this.setStatusMessage("Need more wins for next slot");
-        } else if (ur === "max_slots") {
-          this.setStatusMessage("All relic slots unlocked");
-        }
-        this.showTitleOverlay();
-        this.syncDebugState();
-        return;
-      }
-      if (Phaser.Input.Keyboard.JustDown(this.keyRelicCatalog1)) {
-        const r = tryAssignRelicToSlot(0, this.titleFocusedRelicSlot);
-        if (r === "no_credits") this.setStatusMessage("Not enough credits");
-        this.showTitleOverlay();
-        this.syncDebugState();
-        return;
-      }
-      if (Phaser.Input.Keyboard.JustDown(this.keyRelicCatalog2)) {
-        const r = tryAssignRelicToSlot(1, this.titleFocusedRelicSlot);
-        if (r === "no_credits") this.setStatusMessage("Not enough credits");
-        this.showTitleOverlay();
-        this.syncDebugState();
-        return;
-      }
-      if (Phaser.Input.Keyboard.JustDown(this.keyRelicCatalog3)) {
-        const r = tryAssignRelicToSlot(2, this.titleFocusedRelicSlot);
-        if (r === "no_credits") this.setStatusMessage("Not enough credits");
-        this.showTitleOverlay();
-        this.syncDebugState();
-        return;
-      }
-      if (Phaser.Input.Keyboard.JustDown(this.keySpace)) {
-        this.startRunFromTouch();
-      }
       return;
     }
 

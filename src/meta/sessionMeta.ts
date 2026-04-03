@@ -1,6 +1,8 @@
 import {
+  getRelicById,
   MAX_RELIC_SLOTS,
   RELICS,
+  RELICS_TITLE_CATALOG,
   RELIC_SLOT_UNLOCK_RULES,
   type RelicDef,
 } from "./relics";
@@ -142,7 +144,7 @@ export function tryAssignRelicToSlot(
   catalogIndex: number,
   slotIndex: number
 ): TitleRelicAssignResult {
-  const relic = RELICS[catalogIndex] as RelicDef | undefined;
+  const relic = RELICS_TITLE_CATALOG[catalogIndex] as RelicDef | undefined;
   if (!relic) return "invalid";
   if (slotIndex < 0 || slotIndex >= relicSlotCount) return "invalid";
 
@@ -163,6 +165,21 @@ export function tryAssignRelicToSlot(
   }
 
   return "no_credits";
+}
+
+/** Playwright / dev: unlock if needed and equip without spending credits (hidden-catalog relics). */
+export function e2eTitleEquipRelicById(
+  relicId: string,
+  slotIndex: number
+): boolean {
+  const r = getRelicById(relicId);
+  if (!r || slotIndex < 0 || slotIndex >= relicSlotCount) return false;
+  unlockedRelicIds.add(relicId);
+  clearRelicFromOtherSlots(relicId, slotIndex);
+  equippedRelicIds[slotIndex] = relicId;
+  normalizeEquippedLength();
+  saveMetaState();
+  return true;
 }
 
 export function clearRelicSlot(slotIndex: number): void {

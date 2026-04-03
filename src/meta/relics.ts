@@ -12,6 +12,8 @@ export type RelicDef = {
   id: string;
   icon: string;
   name: string;
+  /** Short player-facing summary for title / shop UI. */
+  blurb: string;
   cost: number;
   effect: RelicEffect;
 };
@@ -21,6 +23,7 @@ export const RELICS: readonly RelicDef[] = [
     id: "extra_coffee",
     icon: "☕",
     name: "Extra Coffee",
+    blurb: "+2 starting energy & max energy (stacks).",
     cost: 5,
     effect: { kind: "extra_coffee" },
   },
@@ -28,17 +31,27 @@ export const RELICS: readonly RelicDef[] = [
     id: "calm_mind",
     icon: "🧘",
     name: "Calm Mind",
+    blurb: "-2 starting stress; eases stress from some choices.",
     cost: 5,
     effect: { kind: "calm_mind" },
   },
+  /** Still in data for saves & encounters; omitted from title catalog (`RELICS_TITLE_CATALOG`). */
   {
     id: "aggressive_reply",
     icon: "💢",
     name: "Aggressive Reply",
+    blurb: "+1 office credits on aggressive encounter picks.",
     cost: 7,
     effect: { kind: "aggressive_reply" },
   },
 ] as const;
+
+/**
+ * Title relic row only — omits aggressive_reply for now (still in {@link RELICS} for saves & combat).
+ */
+export const RELICS_TITLE_CATALOG: readonly RelicDef[] = RELICS.filter(
+  (r) => r.id !== "aggressive_reply"
+);
 
 export const MAX_RELIC_SLOTS = 3;
 
