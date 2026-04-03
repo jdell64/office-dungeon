@@ -7,6 +7,7 @@ import {
   type RelicDef,
 } from "./relics";
 import { saveMetaState } from "./metaStorage";
+import { getSessionStatsForDebug } from "./sessionStats";
 
 const STARTER_UNLOCKED = "extra_coffee";
 
@@ -113,18 +114,69 @@ export function addOfficeCredits(amount: number): void {
 
 const UNLOCK_TEASE_MAX_GAP = 3;
 
-export function getNextRelicUnlockTease(): string | null {
-  const credits = officeCredits;
+/** First locked relic that still needs credits, if any. */
+function firstRelicCreditShortfall():
+  | { kind: "need_credits"; need: number; text: string }
+  | { kind: "can_unlock_at_title"; text: string }
+  | null {
   for (const r of RELICS) {
     if (unlockedRelicIds.has(r.id)) continue;
-    const need = r.cost - credits;
-    if (need <= 0) continue;
-    if (need <= UNLOCK_TEASE_MAX_GAP) {
+    const need = r.cost - officeCredits;
+    if (need > 0) {
       const unit = need === 1 ? "credit" : "credits";
-      return `${need} more ${unit} to unlock ${r.icon} ${r.name}`;
+      return {
+        kind: "need_credits",
+        need,
+        text: `${need} more ${unit} to unlock ${r.icon} ${r.name}`,
+      };
     }
-    return null;
+    return {
+      kind: "can_unlock_at_title",
+      text: `Unlock ${r.icon} ${r.name} in your loadout`,
+    };
   }
+  return null;
+}
+
+export function getNextRelicUnlockTease(): string | null {
+  const gap = firstRelicCreditShortfall();
+  if (
+    gap &&
+    gap.kind === "need_credits" &&
+    gap.need > 0 &&
+    gap.need <= UNLOCK_TEASE_MAX_GAP
+  ) {
+    return gap.text;
+  }
+  return null;
+}
+
+export function getNextProgressionGoal(): string | null {
+  const relicGoal = firstRelicCreditShortfall();
+  if (relicGoal) return relicGoal.text;
+
+  if (relicSlotCount < MAX_RELIC_SLOTS) {
+    const nextN = relicSlotCount + 1;
+    const rule = RELIC_SLOT_UNLOCK_RULES[nextN];
+    if (rule) {
+      if (rule.kind === "credits") {
+        const need = rule.cost - officeCredits;
+        if (need > 0) {
+          const unit = need === 1 ? "credit" : "credits";
+          return `${need} more ${unit} to unlock a relic slot`;
+        }
+        return "Unlock the next relic slot at the title screen";
+      }
+      const wins = getSessionStatsForDebug().wins;
+      const need = rule.need - wins;
+      if (need > 0) {
+        const unit = need === 1 ? "run" : "runs";
+        return `Win ${need} more ${unit} to unlock a relic slot`;
+      }
+      return "Unlock the next relic slot at the title screen";
+    }
+  }
+
   return null;
 }
 

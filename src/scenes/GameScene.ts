@@ -5,12 +5,14 @@ import {
   type ResolvedEncounterChoice,
 } from "../data/encounters";
 import {
-  EVENT_POOL_IDS,
+  buildWeightedEventPoolIds,
   getEnemyType,
   getEventType,
   isChoiceEvent,
   layoutBlockedSet,
   LAYOUTS,
+  MAX_LAYOUT_COLS,
+  MAX_LAYOUT_ROWS,
   warnBlockedTileEntityOverlaps,
   warnIfExitUnreachable,
   type EventChoiceDef,
@@ -56,7 +58,7 @@ import {
   clearRelicSlot,
   getEquippedRelicIds,
   getEquippedRelicSlots,
-  getNextRelicUnlockTease,
+  getNextProgressionGoal,
   getOfficeCredits,
   getRelicSlotCount,
   getUnlockedRelicIds,
@@ -78,8 +80,14 @@ import { uiTextStyle } from "../ui/uiText";
 const PLAYER_PADDING = 7;
 /** Manhattan distance to exit for "So close..." on loss. */
 const NEAR_EXIT_DISTANCE = 2;
-/** Fixed run goal for work progress (phase 2 core loop). */
+/** Fixed run goal for work progress (phase 2 core loop; full multi-floor day). */
 const RUN_WORK_TARGET = 32;
+/** One “work day” spans this many layouts in sequence (phase 3). */
+const FLOORS_PER_RUN = 3;
+/** Cumulative work required before the exit accepts completion on floor `floorIndex` (0-based). */
+function workExitThresholdForFloor(floorIndex: number): number {
+  return Math.ceil((RUN_WORK_TARGET * (floorIndex + 1)) / FLOORS_PER_RUN);
+}
 /** Work granted when an office encounter removes an enemy (not per choice). */
 const WORK_PER_ENEMY_DEFEAT = 6;
 const COLOR_TILE_A = 0x2a2a3e;
@@ -122,6 +130,9 @@ const TITLE_DEPTH = 1002;
 /** Above HUD/status so the start screen dims them; below title copy (TITLE_DEPTH). */
 const TITLE_BACKDROP_DEPTH = 1001.5;
 const SUMMARY_DEPTH = 1003;
+/** Brief “Floor complete” overlay between floors (above summary). */
+const FLOOR_TRANSITION_DEPTH = SUMMARY_DEPTH + 1;
+const FLOOR_TRANSITION_MS = 1200;
 /** Footer encounter/event prompt copy (above phase lines, below board). */
 const FOOTER_PROMPT_DEPTH = 998;
 /** Header strip behind compact HUD. */
@@ -170,7 +181,8 @@ const TITLE_UI_DEPTH = TOUCH_UI_DEPTH;
  * Header: compact run stats. Board: grid + entities (starts at `boardWorldOffsetY()`).
  * Footer: prompts, phase + last action, touch controls (see `layoutFooterMessages`).
  */
-const UI_HEADER_PX = 44;
+/** Stats + floor/relic line(s); word-wrap can produce 3 lines on narrow widths. */
+const UI_HEADER_PX = 66;
 /** Minimum reserved height for encounter/event prompt (actual height measured + clamped). */
 const FOOTER_PROMPT_RESERVE_PX = 56;
 /** Run phase label (Ready / Running / …). */
@@ -235,9 +247,25 @@ export class GameScene extends Phaser.Scene {
   /** Current layout's blocked cells (`"x,y"` keys). */
   private blockedCells = new Set<string>();
   private gridBoardGraphics: Phaser.GameObjects.Graphics | null = null;
-  /** When set from `?layout=N`, every new run uses this index. */
+  /** Centers smaller maps inside the fixed max-col/max-row board area. */
+  private boardPadX = 0;
+  private boardPadY = 0;
+  /**
+   * Board tile size for the current work day. Recomputed on each new run, then held
+   * across floor loads so parent/viewport jitter (status bar, WebView chrome) does not
+   * change FIT scale or footer layout between floors.
+   */
+  private lockedRunTileSize: number | null = null;
+  /** When set from `?layout=N`, every floor in a new run uses this layout index (deterministic QA). */
   private pinnedLayoutIndexFromUrl: number | null = null;
   private currentLayoutIndex = 0;
+  /** 0-based floor within the current work day (phase 3 multi-floor run). */
+  private currentFloorIndex = 0;
+  /** Layout index per floor, chosen once at full run setup. */
+  private floorLayoutIndices: number[] = [0, 0, 0];
+  /** Blocks movement/input while the between-floors overlay is visible. */
+  private floorTransitionActive = false;
+  private floorTransitionObjects: Phaser.GameObjects.GameObject[] = [];
   private player!: Player;
   private enemies: Enemy[] = [];
   private enemyRects: (Phaser.GameObjects.Rectangle | null)[] = [];
@@ -357,15 +385,18 @@ export class GameScene extends Phaser.Scene {
     return UI_HEADER_PX;
   }
 
-  /** Top Y of the footer panel (below board). */
+  /** Top Y of the footer panel (below board). Uses max row span so footer position is stable across floors. */
   private footerTopY(): number {
-    return UI_HEADER_PX + this.grid.rows * this.grid.tileSize;
+    return UI_HEADER_PX + MAX_LAYOUT_ROWS * this.grid.tileSize;
   }
 
-  /** Tile center in world space; accounts for header offset. */
+  /** Tile center in world space; accounts for header offset and board letterboxing. */
   private boardCellCenter(gridX: number, gridY: number): { x: number; y: number } {
     const p = this.grid.gridToWorldCenter(gridX, gridY);
-    return { x: p.x, y: p.y + this.boardWorldOffsetY() };
+    return {
+      x: p.x + this.boardPadX,
+      y: p.y + this.boardWorldOffsetY() + this.boardPadY,
+    };
   }
 
   /** Fallback before `syncTouchLayer` has run (matches legacy footer math). */
@@ -537,33 +568,58 @@ export class GameScene extends Phaser.Scene {
     el.textContent = `${this.footerPhaseText.text}\n${this.statusText.text}`;
   }
 
-  private pickLayoutIndexForNewRun(): number {
-    if (this.pinnedLayoutIndexFromUrl !== null) {
-      return this.pinnedLayoutIndexFromUrl;
+  /** Picks one layout index per floor. URL-pinned layout applies to all floors (see `pinnedLayoutIndexFromUrl`). */
+  private pickFloorLayoutSequenceForNewRun(): number[] {
+    const seq: number[] = [];
+    for (let i = 0; i < FLOORS_PER_RUN; i++) {
+      if (this.pinnedLayoutIndexFromUrl !== null) {
+        seq.push(this.pinnedLayoutIndexFromUrl);
+      } else {
+        seq.push(Phaser.Math.RND.integerInRange(0, LAYOUTS.length - 1));
+      }
     }
-    return Phaser.Math.RND.integerInRange(0, LAYOUTS.length - 1);
+    return seq;
+  }
+
+  /** Updates energy/stress ceilings from layout + relics (call on each floor load). */
+  private recomputeEffectiveCapsFromLayout(layout: LayoutDef): void {
+    this.effectiveMaxEnergy = layout.player.maxEnergy;
+    this.effectiveMaxStress = layout.player.maxStress;
+    const relicIds = getEquippedRelicIds();
+    const eBonus = aggregatedStartEnergyBonus(relicIds);
+    if (eBonus > 0) {
+      this.effectiveMaxEnergy = layout.player.maxEnergy + eBonus;
+    }
+    this.effectiveMaxEnergy = Math.max(1, this.effectiveMaxEnergy);
+  }
+
+  /** After cap change (new floor), keep vitals in range without resetting a fresh run. */
+  private clampPlayerVitalsToCaps(): void {
+    this.player.energy = Math.max(
+      0,
+      Math.min(this.player.energy, this.effectiveMaxEnergy)
+    );
+    const maxStressPlayable = Math.max(0, this.effectiveMaxStress - 1);
+    this.player.stress = Math.min(this.player.stress, maxStressPlayable);
   }
 
   private computeStartingVitals(layout: LayoutDef): {
     startEnergy: number;
     startStress: number;
   } {
+    this.recomputeEffectiveCapsFromLayout(layout);
     let energy = layout.player.startEnergy;
     let stress = layout.player.startStress;
-    this.effectiveMaxEnergy = layout.player.maxEnergy;
-    this.effectiveMaxStress = layout.player.maxStress;
     const relicIds = getEquippedRelicIds();
     const eBonus = aggregatedStartEnergyBonus(relicIds);
     if (eBonus > 0) {
       energy += eBonus;
-      this.effectiveMaxEnergy = layout.player.maxEnergy + eBonus;
     }
     const sRed = aggregatedStartStressReduction(relicIds);
     if (sRed > 0) {
       stress = Math.max(0, stress - sRed);
     }
     energy = Math.max(1, energy);
-    this.effectiveMaxEnergy = Math.max(1, this.effectiveMaxEnergy);
     return { startEnergy: energy, startStress: stress };
   }
 
@@ -646,13 +702,15 @@ export class GameScene extends Phaser.Scene {
     this.syncDebugState();
   }
 
-  /** Adds work from an interaction and checks win (reward tile may call when granting work). */
+  /**
+   * Adds work from an interaction. Run victory is only granted on the final floor exit
+   * (phase 3 multi-floor day), not when the bar fills mid-floor.
+   */
   private addWork(amount: number): void {
     if (amount <= 0) return;
     if (!this.runStarted || this.gameOver || this.gameWon) return;
     this.workDone += amount;
     this.updateHud();
-    this.checkForWin();
   }
 
   private ensureAudioUnlocked(): void {
@@ -896,9 +954,8 @@ export class GameScene extends Phaser.Scene {
     const maxBoardPx = Math.floor(
       Math.min(m * 0.58, Math.max(m * 0.42, ph - chromeApprox))
     );
-    const maxTile = Math.floor(
-      maxBoardPx / Math.max(layout.grid.cols, layout.grid.rows)
-    );
+    const maxGridSpan = Math.max(MAX_LAYOUT_COLS, MAX_LAYOUT_ROWS);
+    const maxTile = Math.floor(maxBoardPx / maxGridSpan);
     return Math.max(24, Math.min(base, maxTile));
   }
 
@@ -911,6 +968,7 @@ export class GameScene extends Phaser.Scene {
     return {
       movement:
         this.runStarted &&
+        !this.floorTransitionActive &&
         this.activeEventIndex === null &&
         this.activeEncounterEnemyIndex === null &&
         !this.gameOver &&
@@ -930,6 +988,7 @@ export class GameScene extends Phaser.Scene {
 
   /** One grid step; same rules as arrow keys (caller must gate by game state). */
   private tryStep(dx: number, dy: number): void {
+    if (this.floorTransitionActive) return;
     if (dx === 0 && dy === 0) return;
     const nx = this.playerGridX + dx;
     const ny = this.playerGridY + dy;
@@ -970,7 +1029,7 @@ export class GameScene extends Phaser.Scene {
     this.ensureAudioUnlocked();
     playMoveSfx();
 
-    this.player.energy -= 1;
+    // Phase 3: movement is free; energy is spent via encounters/events, not steps.
     this.turnsTaken += 1;
 
     if (this.tryEncounterAtTile(this.playerGridX, this.playerGridY)) {
@@ -1671,7 +1730,9 @@ export class GameScene extends Phaser.Scene {
 
   create(): void {
     this.pinnedLayoutIndexFromUrl = parseLayoutIndexFromUrl();
-    this.currentLayoutIndex = this.pickLayoutIndexForNewRun();
+    this.floorLayoutIndices = this.pickFloorLayoutSequenceForNewRun();
+    this.currentFloorIndex = 0;
+    this.currentLayoutIndex = this.floorLayoutIndices[0] ?? 0;
 
     this.cursors = this.input.keyboard!.createCursorKeys();
     this.keyY = this.input.keyboard!.addKey(Phaser.Input.Keyboard.KeyCodes.Y);
@@ -1754,41 +1815,16 @@ export class GameScene extends Phaser.Scene {
     this.registerOdE2e();
   }
 
-  /** Resets run state and visuals; logs "Run restarted" when `logRestart` (R key). */
-  private setupRunEntities(logRestart: boolean): void {
-    if (logRestart) {
-      this.currentLayoutIndex = this.pickLayoutIndexForNewRun();
+  private dismissFloorTransitionOverlay(): void {
+    for (const o of this.floorTransitionObjects) {
+      o.destroy();
     }
+    this.floorTransitionObjects = [];
+    this.floorTransitionActive = false;
+  }
 
-    this.hideRunSummaryOverlay();
-
-    const layout = this.activeLayout();
-    const tileSize = this.computeResponsiveTileSize(layout);
-    const gridSpec = {
-      cols: layout.grid.cols,
-      rows: layout.grid.rows,
-      tileSize,
-    };
-    const w = layout.grid.cols * tileSize;
-    const gridH = layout.grid.rows * tileSize;
-    const h = UI_HEADER_PX + gridH + UI_FOOTER_PX;
-    this.scale.setGameSize(w, h);
-    // Phaser's default RESIZE handler only updates the main camera when its size
-    // exactly matches the *previous* game size; if that ever fails, the camera
-    // stays out of sync with setGameSize and entities can render off-screen.
-    const cam = this.cameras.main;
-    cam.setPosition(0, 0);
-    cam.setSize(w, h);
-    cam.setScroll(0, 0);
-
-    this.gridBoardGraphics?.destroy();
-    this.gridBoardGraphics = null;
-    this.grid = new GridSystem(gridSpec);
-    this.blockedCells = layoutBlockedSet(layout);
-    warnBlockedTileEntityOverlaps(layout, this.blockedCells);
-    warnIfExitUnreachable(layout, this.blockedCells);
-    this.drawGrid(layout);
-
+  /** Clears per-run progress for a new work day (single-floor reset became multi-floor in phase 3). */
+  private runFullRunStateReset(): void {
     this.gameOver = false;
     this.gameWon = false;
     this.gameOverReason = null;
@@ -1806,10 +1842,54 @@ export class GameScene extends Phaser.Scene {
     this.activeEventIndex = null;
     this.activeEncounterEnemyIndex = null;
     this.clearFooterPrompt();
+    this.lockedRunTileSize = null;
+  }
+
+  /**
+   * Rebuilds grid + entities for `currentLayoutIndex`.
+   * @param preservePlayer — next floor: keep energy/stress/work; new run: fresh vitals from layout + relics.
+   */
+  private rebuildWorldFromActiveLayout(preservePlayer: boolean): void {
+    const layout = this.activeLayout();
+    const tileSize =
+      preservePlayer && this.lockedRunTileSize !== null
+        ? this.lockedRunTileSize
+        : (this.lockedRunTileSize = this.computeResponsiveTileSize(layout));
+    const gridSpec = {
+      cols: layout.grid.cols,
+      rows: layout.grid.rows,
+      tileSize,
+    };
+    const cols = layout.grid.cols;
+    const rows = layout.grid.rows;
+    this.boardPadX = Math.floor(((MAX_LAYOUT_COLS - cols) * tileSize) / 2);
+    this.boardPadY = Math.floor(((MAX_LAYOUT_ROWS - rows) * tileSize) / 2);
+    const w = MAX_LAYOUT_COLS * tileSize;
+    const gridH = MAX_LAYOUT_ROWS * tileSize;
+    const h = UI_HEADER_PX + gridH + UI_FOOTER_PX;
+    this.scale.setGameSize(w, h);
+    const cam = this.cameras.main;
+    cam.setPosition(0, 0);
+    cam.setSize(w, h);
+    cam.setScroll(0, 0);
+
+    this.gridBoardGraphics?.destroy();
+    this.gridBoardGraphics = null;
+    this.grid = new GridSystem(gridSpec);
+    this.blockedCells = layoutBlockedSet(layout);
+    warnBlockedTileEntityOverlaps(layout, this.blockedCells);
+    warnIfExitUnreachable(layout, this.blockedCells);
+    this.drawGrid(layout);
+
     this.playerGridX = layout.player.startGrid.x;
     this.playerGridY = layout.player.startGrid.y;
-    const { startEnergy, startStress } = this.computeStartingVitals(layout);
-    this.player = new Player(startEnergy, startStress);
+    if (preservePlayer) {
+      this.recomputeEffectiveCapsFromLayout(layout);
+      this.clampPlayerVitalsToCaps();
+    } else {
+      const { startEnergy, startStress } = this.computeStartingVitals(layout);
+      this.player = new Player(startEnergy, startStress);
+    }
     this.enemies = layout.enemies.map((pl) => {
       const t = getEnemyType(pl.typeId);
       return new Enemy(t, pl.grid.x, pl.grid.y, {
@@ -1973,6 +2053,22 @@ export class GameScene extends Phaser.Scene {
         evl.setVisible(true);
       }
     }
+  }
+
+  /** Resets run state and visuals; logs "Run restarted" when `logRestart` (R key). */
+  private setupRunEntities(logRestart: boolean): void {
+    this.dismissFloorTransitionOverlay();
+
+    if (logRestart) {
+      this.floorLayoutIndices = this.pickFloorLayoutSequenceForNewRun();
+      this.currentFloorIndex = 0;
+    }
+    this.currentLayoutIndex = this.floorLayoutIndices[this.currentFloorIndex] ?? 0;
+
+    this.hideRunSummaryOverlay();
+
+    this.runFullRunStateReset();
+    this.rebuildWorldFromActiveLayout(false);
 
     this.layoutFooterMessages();
     this.setStatusMessage("");
@@ -1982,6 +2078,55 @@ export class GameScene extends Phaser.Scene {
     if (!this.runStarted) {
       this.showTitleOverlay();
     }
+  }
+
+  private loadNextFloorFromSequence(): void {
+    this.dismissFloorTransitionOverlay();
+    this.currentFloorIndex += 1;
+    this.currentLayoutIndex = this.floorLayoutIndices[this.currentFloorIndex] ?? 0;
+    this.activeEventIndex = null;
+    this.activeEncounterEnemyIndex = null;
+    this.clearFooterPrompt();
+    this.rebuildWorldFromActiveLayout(true);
+    this.layoutFooterMessages();
+    this.setStatusMessage("");
+    this.syncDebugState();
+  }
+
+  /** Between floors: short overlay then `loadNextFloorFromSequence`. */
+  private showFloorCompleteTransition(nextFloorOneBased: number): void {
+    this.dismissFloorTransitionOverlay();
+    this.floorTransitionActive = true;
+
+    const vw = this.scale.width;
+    const vh = this.scale.height;
+    const g = this.add.graphics();
+    g.fillStyle(0x141428, 0.88);
+    g.fillRect(0, 0, vw, vh);
+    g.setScrollFactor(0, 0);
+    g.setDepth(FLOOR_TRANSITION_DEPTH);
+
+    const body = `Floor Complete\n\nHeading to Floor ${nextFloorOneBased} of ${FLOORS_PER_RUN}`;
+    const t = this.add.text(
+      vw / 2,
+      vh / 2,
+      body,
+      uiTextStyle({
+        fontSize: this.isCompactViewport() ? "15px" : "17px",
+        color: "#e8e8ff",
+        align: "center",
+      })
+    );
+    t.setOrigin(0.5);
+    t.setScrollFactor(0, 0);
+    t.setDepth(FLOOR_TRANSITION_DEPTH + 1);
+
+    this.floorTransitionObjects = [g, t];
+    this.syncDebugState();
+
+    this.time.delayedCall(FLOOR_TRANSITION_MS, () => {
+      this.loadNextFloorFromSequence();
+    });
   }
 
   private computeScreenState(): ScreenState {
@@ -2047,8 +2192,6 @@ export class GameScene extends Phaser.Scene {
         lossEncouragement.push("So close...");
       }
       lossEncouragement.push("One more run?");
-      const tease = getNextRelicUnlockTease();
-      if (tease) lossEncouragement.push(tease);
     }
 
     const creditsLine = `Credits Earned: +${this.creditsEarnedThisRun}`;
@@ -2067,12 +2210,12 @@ export class GameScene extends Phaser.Scene {
     if (lossEncouragement.length) {
       summaryLines.push("", ...lossEncouragement);
     }
-    summaryLines.push(
-      "",
-      `Total Office Credits: ${getOfficeCredits()}`,
-      "",
-      "Tap here or Restart below to continue"
-    );
+    summaryLines.push("", `Total Office Credits: ${getOfficeCredits()}`);
+    const nextGoal = getNextProgressionGoal();
+    if (nextGoal) {
+      summaryLines.push("", `Next goal: ${nextGoal}`);
+    }
+    summaryLines.push("", "Tap here or Restart below to continue");
     if (this.gameOver) {
       if (!this.continueUsedThisRun) {
         summaryLines.push("", "Continue: available");
@@ -2178,6 +2321,10 @@ export class GameScene extends Phaser.Scene {
     pushLine("Office Dungeon", compact ? "20px" : "26px");
     pushLine("Survive the workday.", compact ? "12px" : "14px");
     pushLine(`💰 ${credits}`, compact ? "12px" : "14px");
+    const progressionHint = getNextProgressionGoal();
+    if (progressionHint) {
+      pushLine(progressionHint, compact ? "10px" : "11px");
+    }
 
     py += 8;
 
@@ -2397,6 +2544,12 @@ export class GameScene extends Phaser.Scene {
         index: this.currentLayoutIndex,
         name: layout.name,
       },
+      floor: {
+        current: this.runStarted ? this.currentFloorIndex + 1 : 0,
+        total: FLOORS_PER_RUN,
+        layoutSequence: [...this.floorLayoutIndices],
+        layoutIdSequence: this.floorLayoutIndices.map((idx) => LAYOUTS[idx]!.id),
+      },
       currentEventId,
       currentEncounterId,
       lastEventResult: this.lastEventResult,
@@ -2491,21 +2644,34 @@ export class GameScene extends Phaser.Scene {
   private updateHud(): void {
     const layout = this.activeLayout();
     const credits = getOfficeCredits();
-    const statsTail = `🤯 ${this.player.stress}/${this.effectiveMaxStress}   💰 ${credits}   💼 ${this.workDone}/${this.workTarget}`;
+    const floorBit = this.runStarted
+      ? `🏢 ${this.currentFloorIndex + 1}/${FLOORS_PER_RUN}   `
+      : "";
+    const statsTail = `${floorBit}🤯 ${this.player.stress}/${this.effectiveMaxStress}   💰 ${credits}   💼 ${this.workDone}/${this.workTarget}`;
     const line1Mirror = `⚡ ${this.player.energy}/${this.effectiveMaxEnergy}   ${statsTail}`;
     const line1Display = statsTail;
     const relicHud = this.formatHudRelicsShort();
-    const shortName =
-      layout.name.length > 16 ? `${layout.name.slice(0, 15)}…` : layout.name;
-    const shortLayout = layout.hudIcon
-      ? `${layout.hudIcon} ${shortName}`
-      : shortName;
+    const layoutLine = layout.hudIcon
+      ? `${layout.hudIcon} ${layout.name}`
+      : layout.name;
     const line2 = relicHud
-      ? `${shortLayout} · ${relicHud}`
-      : `${shortLayout} (${layout.id})`;
+      ? `${layoutLine} · ${relicHud}`
+      : `${layoutLine} (${layout.id})`;
     const body = `${line1Display}\n${line2}`;
     this.drawEnergyBattery();
-    this.hudText.setStyle(uiTextStyle({ fontSize: this.hudFontSizePx() }));
+    const hudX = TOUCH_EDGE_INSET + this.energyBatteryHudOffsetX();
+    const hudWrapW = Math.max(
+      60,
+      this.scale.width - hudX - TOUCH_EDGE_INSET
+    );
+    this.hudText.setStyle(
+      uiTextStyle({
+        fontSize: this.hudFontSizePx(),
+        color: "#e8e8ff",
+        wordWrap: { width: hudWrapW },
+        lineSpacing: 2,
+      })
+    );
     this.hudText.setText(body);
     if (this.footerPhaseText) {
       this.footerPhaseText.setStyle(
@@ -2529,11 +2695,18 @@ export class GameScene extends Phaser.Scene {
     this.gridBoardGraphics = g;
     const ts = this.grid.tileSize;
     const oy = UI_HEADER_PX;
+    const px = this.boardPadX;
+    const py = this.boardPadY;
+    const maxBoardW = MAX_LAYOUT_COLS * ts;
+    const maxBoardH = MAX_LAYOUT_ROWS * ts;
+
+    g.fillStyle(0x141422, 1);
+    g.fillRect(0, oy, maxBoardW, maxBoardH);
 
     for (let gy = 0; gy < this.grid.rows; gy++) {
       for (let gx = 0; gx < this.grid.cols; gx++) {
-        const x = gx * ts;
-        const y = gy * ts + oy;
+        const x = gx * ts + px;
+        const y = gy * ts + oy + py;
         if (this.isBlockedTile(gx, gy)) {
           g.fillStyle(COLOR_BLOCKED_TILE, 1);
           g.fillRect(x, y, ts, ts);
@@ -2550,7 +2723,7 @@ export class GameScene extends Phaser.Scene {
     const tintCell = (gx: number, gy: number, color: number): void => {
       if (this.isBlockedTile(gx, gy)) return;
       g.fillStyle(color, FLOOR_TINT_ALPHA);
-      g.fillRect(gx * ts, gy * ts + oy, ts, ts);
+      g.fillRect(gx * ts + px, gy * ts + oy + py, ts, ts);
     };
     for (const e of layout.enemies) {
       tintCell(e.grid.x, e.grid.y, FLOOR_TINT_ENEMY);
@@ -2564,18 +2737,18 @@ export class GameScene extends Phaser.Scene {
     g.lineStyle(1, COLOR_GRID_LINE, 1);
     const gridPixelH = this.grid.rows * ts;
     for (let i = 0; i <= this.grid.cols; i++) {
-      const x = i * ts;
-      g.lineBetween(x, oy, x, gridPixelH + oy);
+      const x = i * ts + px;
+      g.lineBetween(x, oy + py, x, gridPixelH + oy + py);
     }
     for (let j = 0; j <= this.grid.rows; j++) {
-      const y = j * ts + oy;
-      g.lineBetween(0, y, this.grid.cols * ts, y);
+      const y = j * ts + oy + py;
+      g.lineBetween(px, y, this.grid.cols * ts + px, y);
     }
 
     g.fillStyle(0x141422, 1);
-    g.fillRect(0, gridPixelH + oy, this.grid.cols * ts, UI_FOOTER_PX);
+    g.fillRect(0, maxBoardH + oy, maxBoardW, UI_FOOTER_PX);
     g.lineStyle(1, 0x2a2a40, 0.95);
-    g.lineBetween(0, gridPixelH + oy, this.grid.cols * ts, gridPixelH + oy);
+    g.lineBetween(0, maxBoardH + oy, maxBoardW, maxBoardH + oy);
   }
 
   /**
@@ -2791,19 +2964,27 @@ export class GameScene extends Phaser.Scene {
     this.syncDebugState();
   }
 
-  /** Exit door tile (marked "X"): win if work quota is met; otherwise nudge the player. */
+  /**
+   * Exit tile: cumulative work must reach the floor threshold; then advance floors or win the day
+   * on the last floor (phase 3 multi-floor run).
+   */
   private tryExitAtTile(gridX: number, gridY: number): void {
     const layout = this.activeLayout();
-    if (this.gameOver || this.gameWon) return;
+    if (this.gameOver || this.gameWon || this.floorTransitionActive) return;
     if (gridX !== layout.exit.x || gridY !== layout.exit.y) return;
 
-    if (this.workDone >= this.workTarget) {
-      this.checkForWin();
+    const threshold = workExitThresholdForFloor(this.currentFloorIndex);
+    if (this.workDone < threshold) {
+      this.setStatusMessage("Exit — finish your work first");
+      const c = this.boardCellCenter(gridX, gridY);
+      this.spawnFloater(c.x, c.y, "Need more work", FLOAT_COLOR_EVENT, -12);
       return;
     }
-    this.setStatusMessage("Exit — finish your work first");
-    const c = this.boardCellCenter(gridX, gridY);
-    this.spawnFloater(c.x, c.y, "Need more work", FLOAT_COLOR_EVENT, -12);
+    if (this.currentFloorIndex < FLOORS_PER_RUN - 1) {
+      this.showFloorCompleteTransition(this.currentFloorIndex + 2);
+      return;
+    }
+    this.checkForWin();
   }
 
   private assignEventRuntimeTypes(layout: LayoutDef): void {
@@ -2815,7 +2996,12 @@ export class GameScene extends Phaser.Scene {
     if (parseUseLayoutEventTypesFromUrl()) {
       this.eventRuntimeTypeIds = layout.events.map((e) => e.typeId);
     } else {
-      const pool = [...EVENT_POOL_IDS];
+      // Floor index + current vitals bias the pool (safe vs risky) and filter conditions.
+      const pool = buildWeightedEventPoolIds(
+        this.currentFloorIndex,
+        this.player.stress,
+        this.player.energy
+      );
       this.eventRuntimeTypeIds = layout.events.map(() =>
         this.runEventRng.pick(pool)
       );
@@ -2862,12 +3048,15 @@ export class GameScene extends Phaser.Scene {
     );
     this.player.stress = Math.max(0, this.player.stress + stressExtra);
 
+    const creditsDelta = et.creditsDelta ?? 0;
+    this.grantOfficeCreditsDuringRun(creditsDelta);
+
     const dE = this.player.energy - energyBefore;
     const dS = this.player.stress - stressBefore;
     if (dE < 0) {
       playHurtSfx();
     }
-    this.spawnEventOutcomeFloaters(dE, dS);
+    this.spawnEventOutcomeFloaters(dE, dS, creditsDelta);
 
     const detail: string[] = [];
     if (et.energyDelta !== 0) {
@@ -2878,6 +3067,9 @@ export class GameScene extends Phaser.Scene {
     }
     if (et.workDelta !== 0) {
       detail.push(this.formatSigned(et.workDelta, "Work"));
+    }
+    if (creditsDelta !== 0) {
+      detail.push(this.formatSigned(creditsDelta, "credits"));
     }
     this.lastEventResult =
       detail.length > 0 ? `${et.name}: ${detail.join(", ")}` : et.name;
@@ -2966,14 +3158,18 @@ export class GameScene extends Phaser.Scene {
       )
     );
     this.player.stress = Math.max(0, this.player.stress + stressDelta);
+    const creditsDelta = choice.creditsDelta ?? 0;
+    this.grantOfficeCreditsDuringRun(creditsDelta);
     const dE = this.player.energy - energyBefore;
     const dS = this.player.stress - stressBefore;
     if (dE < 0) {
       playHurtSfx();
     }
-    this.spawnEventOutcomeFloaters(dE, dS);
+    this.spawnEventOutcomeFloaters(dE, dS, creditsDelta);
     const w = choice.workDelta;
-    this.lastEventResult = `${et.name}: ${choice.label} (${this.formatSigned(choice.energyDelta, "Energy")}, ${this.formatSigned(stressDelta, "Stress")}${w !== 0 ? `, ${this.formatSigned(w, "Work")}` : ""})`;
+    const creditBit =
+      creditsDelta !== 0 ? `, ${this.formatSigned(creditsDelta, "credits")}` : "";
+    this.lastEventResult = `${et.name}: ${choice.label} (${this.formatSigned(choice.energyDelta, "Energy")}, ${this.formatSigned(stressDelta, "Stress")}${w !== 0 ? `, ${this.formatSigned(w, "Work")}` : ""}${creditBit})`;
     console.log("Event resolved");
     this.eventsResolved += 1;
     this.eventAvailable[idx] = false;
@@ -3028,6 +3224,8 @@ export class GameScene extends Phaser.Scene {
       this.performRewardedContinue();
       return;
     }
+
+    if (this.floorTransitionActive) return;
 
     if (this.activeEncounterEnemyIndex !== null) {
       const enc = getEncounterById(

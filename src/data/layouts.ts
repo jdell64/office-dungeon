@@ -17,6 +17,13 @@ export type EventChoiceDef = {
   energyDelta: number;
   stressDelta: number;
   workDelta: number;
+  creditsDelta?: number;
+};
+
+/** Optional spawn filter: evaluated when events are assigned to tiles (per floor). */
+export type EventSpawnConditions = {
+  minStress?: number;
+  maxEnergy?: number;
 };
 
 export type EventChoiceTypeDef = {
@@ -26,6 +33,8 @@ export type EventChoiceTypeDef = {
   prompt: string;
   choiceY: EventChoiceDef;
   choiceN: EventChoiceDef;
+  tags?: string[];
+  conditions?: EventSpawnConditions;
 };
 
 export type EventInstantTypeDef = {
@@ -38,6 +47,9 @@ export type EventInstantTypeDef = {
   stressChance: number;
   stressDeltaIfRoll: number;
   workDelta: number;
+  creditsDelta?: number;
+  tags?: string[];
+  conditions?: EventSpawnConditions;
 };
 
 export type EventTypeDef = EventChoiceTypeDef | EventInstantTypeDef;
@@ -124,6 +136,7 @@ export const eventTypes: readonly EventTypeDef[] = [
     id: "coworker_venting",
     name: "Coworker Venting",
     prompt: "Coworker Venting\nA coworker starts venting to you in the hallway.",
+    tags: ["stress", "work"],
     choiceY: {
       label: "Listen",
       energyDelta: 0,
@@ -143,6 +156,7 @@ export const eventTypes: readonly EventTypeDef[] = [
     name: "Free Snacks",
     prompt:
       "Free Snacks\nDonuts in the break room — you grab one on the way through.",
+    tags: ["safe", "energy", "work"],
     energyDelta: 1,
     stressChance: 0.15,
     stressDeltaIfRoll: 1,
@@ -154,6 +168,7 @@ export const eventTypes: readonly EventTypeDef[] = [
     name: "Manager Compliment",
     prompt:
       "Manager Compliment\nYour manager praises you in front of the team.",
+    tags: ["safe", "stress", "work"],
     choiceY: {
       label: "Thank them",
       energyDelta: 0,
@@ -173,6 +188,7 @@ export const eventTypes: readonly EventTypeDef[] = [
     name: "Coffee Spill",
     prompt:
       "Coffee Spill\nSomeone bumps you and hot coffee sloshes toward your shirt.",
+    tags: ["risky", "stress", "work"],
     choiceY: {
       label: "Jump back",
       energyDelta: -1,
@@ -191,6 +207,7 @@ export const eventTypes: readonly EventTypeDef[] = [
     id: "manager_checkin",
     name: "Manager Check-in",
     prompt: "Manager Check-in\nYour manager corners you for a quick sync.",
+    tags: ["safe", "stress", "work"],
     choiceY: {
       label: "Keep it brief",
       energyDelta: 0,
@@ -210,6 +227,7 @@ export const eventTypes: readonly EventTypeDef[] = [
     name: "Printer Jam",
     prompt:
       "Printer Jam\nThe copier ate your report right before the deadline.",
+    tags: ["risky", "stress", "work"],
     choiceY: {
       label: "Clear it",
       energyDelta: -1,
@@ -229,6 +247,7 @@ export const eventTypes: readonly EventTypeDef[] = [
     name: "Last-Minute Invite",
     prompt:
       "Last-Minute Invite\nYou're pinged to join a \"quick\" sync in five minutes.",
+    tags: ["stress", "work"],
     choiceY: {
       label: "Decline politely",
       energyDelta: -1,
@@ -248,6 +267,7 @@ export const eventTypes: readonly EventTypeDef[] = [
     name: "Desk Neatness Check",
     prompt:
       "Desk Neatness Check\nFacilities is doing walkthrough photos today.",
+    tags: ["risky", "stress", "work"],
     choiceY: {
       label: "Tidy up",
       energyDelta: -1,
@@ -261,10 +281,321 @@ export const eventTypes: readonly EventTypeDef[] = [
       workDelta: 8,
     },
   },
-] as const;
+  {
+    kind: "instant",
+    id: "coffee_break",
+    name: "Coffee Break",
+    prompt:
+      "Coffee Break\nYou duck out for a proper cup — hot, bitter, and strangely comforting.",
+    tags: ["safe", "energy", "stress"],
+    energyDelta: 2,
+    stressChance: 0.35,
+    stressDeltaIfRoll: 1,
+    workDelta: 3,
+  },
+  {
+    kind: "choice",
+    id: "crunch_time",
+    name: "Crunch Time",
+    prompt:
+      "Crunch Time\nLeadership wants a \"small push\" before end of day.",
+    tags: ["risky", "stress", "work", "energy"],
+    choiceY: {
+      label: "Say yes",
+      energyDelta: -2,
+      stressDelta: 2,
+      workDelta: 14,
+    },
+    choiceN: {
+      label: "Push back",
+      energyDelta: -1,
+      stressDelta: 1,
+      workDelta: 6,
+    },
+  },
+  {
+    kind: "choice",
+    id: "slack_off",
+    name: "Slack Off",
+    prompt:
+      "Slack Off\nNobody is watching your calendar for the next hour.",
+    tags: ["safe", "energy", "stress", "work"],
+    choiceY: {
+      label: "Rest at desk",
+      energyDelta: 2,
+      stressDelta: -2,
+      workDelta: 0,
+    },
+    choiceN: {
+      label: "Stay sharp",
+      energyDelta: 0,
+      stressDelta: 0,
+      workDelta: 6,
+    },
+  },
+  {
+    kind: "choice",
+    id: "side_project",
+    name: "Side Project",
+    prompt:
+      "Side Project\nA friend offers a paid gig — nights and weekends only.",
+    tags: ["credits", "risky", "stress"],
+    choiceY: {
+      label: "Take it",
+      energyDelta: -1,
+      stressDelta: 2,
+      workDelta: 4,
+      creditsDelta: 1,
+    },
+    choiceN: {
+      label: "Decline",
+      energyDelta: 0,
+      stressDelta: 0,
+      workDelta: 4,
+    },
+  },
+  {
+    kind: "choice",
+    id: "hr_checkin",
+    name: "HR Check-in",
+    prompt:
+      "HR Check-in\nWellness wants a quick pulse on \"how you're really doing.\"",
+    tags: ["safe", "stress", "work"],
+    choiceY: {
+      label: "Be honest",
+      energyDelta: 0,
+      stressDelta: -2,
+      workDelta: 4,
+    },
+    choiceN: {
+      label: "Smile through it",
+      energyDelta: 0,
+      stressDelta: 1,
+      workDelta: 8,
+    },
+  },
+  {
+    kind: "choice",
+    id: "panic_thread",
+    name: "Panic Thread",
+    prompt:
+      "Panic Thread\nA reply-all chain is spiraling — and your name is trending.",
+    tags: ["risky", "stress", "work"],
+    conditions: { minStress: 4 },
+    choiceY: {
+      label: "Dive in and fix it",
+      energyDelta: -2,
+      stressDelta: 2,
+      workDelta: 12,
+    },
+    choiceN: {
+      label: "Mute and hide",
+      energyDelta: -1,
+      stressDelta: 1,
+      workDelta: 4,
+    },
+  },
+  {
+    kind: "instant",
+    id: "emergency_espresso",
+    name: "Emergency Espresso",
+    prompt:
+      "Emergency Espresso\nThe machine is free and you are running on fumes.",
+    tags: ["energy", "stress", "safe"],
+    conditions: { maxEnergy: 2 },
+    energyDelta: 2,
+    stressChance: 0.4,
+    stressDeltaIfRoll: 1,
+    workDelta: 2,
+  },
+  {
+    kind: "choice",
+    id: "overtime_offer",
+    name: "Overtime Offer",
+    prompt:
+      "Overtime Offer\nThey'll slip you a little extra if you stay late tonight.",
+    tags: ["credits", "risky", "stress", "work", "energy"],
+    choiceY: {
+      label: "Stay for the pay",
+      energyDelta: -2,
+      stressDelta: 2,
+      workDelta: 10,
+      creditsDelta: 1,
+    },
+    choiceN: {
+      label: "Go home",
+      energyDelta: 1,
+      stressDelta: -1,
+      workDelta: 2,
+    },
+  },
+  {
+    kind: "instant",
+    id: "all_hands_email",
+    name: "All-Hands Email",
+    prompt:
+      "All-Hands Email\nLeadership drops a 2,000-word \"exciting update\" in your inbox.",
+    tags: ["stress", "work"],
+    energyDelta: 0,
+    stressChance: 0.55,
+    stressDeltaIfRoll: 1,
+    workDelta: 6,
+  },
+  {
+    kind: "choice",
+    id: "inbox_zero_hour",
+    name: "Inbox Zero Hour",
+    prompt:
+      "Inbox Zero Hour\nYou have a rare quiet block — burn it down or pace yourself?",
+    tags: ["work", "energy", "stress"],
+    choiceY: {
+      label: "Power through",
+      energyDelta: -1,
+      stressDelta: 1,
+      workDelta: 12,
+    },
+    choiceN: {
+      label: "Steady pace",
+      energyDelta: 0,
+      stressDelta: -1,
+      workDelta: 6,
+    },
+  },
+  {
+    kind: "instant",
+    id: "window_gazing",
+    name: "Window Gazing",
+    prompt:
+      "Window Gazing\nYou stare at the parking lot until your shoulders unclench.",
+    tags: ["safe", "stress", "energy"],
+    energyDelta: 1,
+    stressChance: 0,
+    stressDeltaIfRoll: 0,
+    workDelta: 0,
+  },
+  {
+    kind: "instant",
+    id: "expense_roulette",
+    name: "Expense Roulette",
+    prompt:
+      "Expense Roulette\nFinance \"might\" approve that team dinner receipt.",
+    tags: ["credits", "stress"],
+    energyDelta: 0,
+    stressChance: 0.3,
+    stressDeltaIfRoll: 1,
+    workDelta: 4,
+    creditsDelta: 1,
+  },
+  {
+    kind: "choice",
+    id: "team_lunch",
+    name: "Team Lunch",
+    prompt:
+      "Team Lunch\nThey're ordering — do you join the group chat or bow out?",
+    tags: ["safe", "energy", "stress", "work"],
+    choiceY: {
+      label: "Join them",
+      energyDelta: 1,
+      stressDelta: -1,
+      workDelta: 5,
+    },
+    choiceN: {
+      label: "Skip it",
+      energyDelta: 0,
+      stressDelta: 1,
+      workDelta: 6,
+    },
+  },
+  {
+    kind: "choice",
+    id: "deadline_roulette",
+    name: "Deadline Roulette",
+    prompt:
+      "Deadline Roulette\nThe client moved the date — again — and only you know.",
+    tags: ["risky", "stress", "work"],
+    conditions: { minStress: 3 },
+    choiceY: {
+      label: "Absorb the chaos",
+      energyDelta: -1,
+      stressDelta: 2,
+      workDelta: 14,
+    },
+    choiceN: {
+      label: "Escalate loudly",
+      energyDelta: -1,
+      stressDelta: 0,
+      workDelta: 6,
+    },
+  },
+  {
+    kind: "instant",
+    id: "fluorescent_buzz",
+    name: "Fluorescent Buzz",
+    prompt:
+      "Fluorescent Buzz\nThe lights hum. Your temples answer. Only when you're already frayed.",
+    tags: ["stress", "risky"],
+    conditions: { minStress: 5 },
+    energyDelta: -1,
+    stressChance: 0.5,
+    stressDeltaIfRoll: 1,
+    workDelta: 3,
+  },
+];
 
 /** Ids eligible for random assignment on event tiles (all defined events). */
 export const EVENT_POOL_IDS: readonly string[] = eventTypes.map((t) => t.id);
+
+export function eventPassesSpawnConditions(
+  def: EventTypeDef,
+  stress: number,
+  energy: number
+): boolean {
+  const c = def.conditions;
+  if (!c) return true;
+  if (c.minStress !== undefined && stress < c.minStress) return false;
+  if (c.maxEnergy !== undefined && energy > c.maxEnergy) return false;
+  return true;
+}
+
+/**
+ * Pool entries for RNG pick per event tile. Duplicates bias toward safe events on
+ * floor 1 and risky/stress-tagged events on floor 3 (`floorIndex` 0 and 2).
+ */
+export function buildWeightedEventPoolIds(
+  floorIndex: number,
+  stress: number,
+  energy: number
+): string[] {
+  let eligible = eventTypes.filter((t) =>
+    eventPassesSpawnConditions(t, stress, energy)
+  );
+  if (eligible.length === 0) {
+    eligible = [...eventTypes];
+  }
+
+  const pool: string[] = [];
+  for (const t of eligible) {
+    pool.push(t.id);
+    const tags = new Set(t.tags ?? []);
+    const isSafe = tags.has("safe");
+    const isRiskyOrStress =
+      tags.has("risky") || tags.has("stress");
+
+    if (floorIndex <= 0) {
+      if (isSafe) {
+        pool.push(t.id, t.id);
+      }
+    } else if (floorIndex === 1) {
+      if (isSafe) pool.push(t.id);
+      if (isRiskyOrStress) pool.push(t.id);
+    } else {
+      if (isRiskyOrStress) {
+        pool.push(t.id, t.id);
+      }
+    }
+  }
+  return pool;
+}
 
 /**
  * Reusable topology ideas for future proc-gen (hand maps below use these shapes):
@@ -694,6 +1025,10 @@ export const LAYOUTS: readonly LayoutDef[] = [
   layoutTopRowSprint,
 ] as const;
 
+/** Largest authored grid span — used so every floor uses the same canvas size (no FIT “zoom” jumps). */
+export const MAX_LAYOUT_COLS = Math.max(...LAYOUTS.map((l) => l.grid.cols));
+export const MAX_LAYOUT_ROWS = Math.max(...LAYOUTS.map((l) => l.grid.rows));
+
 /** Key for blocked-tile sets and lookups. */
 export function layoutCellKey(x: number, y: number): string {
   return `${x},${y}`;
@@ -797,9 +1132,6 @@ export function getEventType(id: string): EventTypeDef {
   return t;
 }
 
-export const GAME_WIDTH = Math.max(
-  ...LAYOUTS.map((l) => l.grid.cols * l.grid.tileSize)
-);
-export const GAME_HEIGHT = Math.max(
-  ...LAYOUTS.map((l) => l.grid.rows * l.grid.tileSize)
-);
+const maxAuthoredTile = Math.max(...LAYOUTS.map((l) => l.grid.tileSize));
+export const GAME_WIDTH = MAX_LAYOUT_COLS * maxAuthoredTile;
+export const GAME_HEIGHT = MAX_LAYOUT_ROWS * maxAuthoredTile;

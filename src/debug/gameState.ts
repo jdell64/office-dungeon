@@ -17,6 +17,13 @@ export type GameDebugState = {
   screenState: ScreenState;
   touchUi: TouchUiDebug;
   layout: { id: string; index: number; name: string };
+  /** Multi-floor “work day”: 1-based current floor, layout indices for the whole run. */
+  floor: {
+    current: number;
+    total: number;
+    layoutSequence: number[];
+    layoutIdSequence: string[];
+  };
   playerPosition: { x: number; y: number };
   playerEnergy: number;
   /** Current run energy ceiling (layout + relics). */

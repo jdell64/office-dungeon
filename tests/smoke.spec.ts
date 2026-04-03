@@ -26,6 +26,12 @@ type GameState = {
     continueReward: boolean;
   };
   layout: { id: string; index: number; name: string };
+  floor: {
+    current: number;
+    total: number;
+    layoutSequence: number[];
+    layoutIdSequence: string[];
+  };
   playerPosition: { x: number; y: number };
   playerEnergy: number;
   playerEnergyMax: number;
@@ -193,7 +199,7 @@ async function pressUntilPlayerAt(
   );
 }
 
-/** E2E only: high energy so long walks still work with 1 energy per tile. */
+/** E2E only: high energy for encounters; movement no longer costs energy (phase 3). */
 async function setTestEnergy(page: Page, n: number): Promise<void> {
   await page.waitForFunction(() => {
     const w = window as Window & { __odE2e?: OdE2e };
@@ -215,13 +221,27 @@ async function setTestEnergy(page: Page, n: number): Promise<void> {
   );
 }
 
-/**
- * Original Office (layout 0): complete work target by resolving all encounters and events.
- * Visits free_snacks last: instant resolve clamps energy to max; doing it early leaves too little for long walks.
- * Per-interaction work: events use data workDelta; enemies +6 each; free_snacks +5; target 32.
- * Requires `/?eventRandom=0&layout=0` and an active run.
- */
-async function completeWorkDayOriginalOffice(page: Page): Promise<void> {
+async function waitForRunningFloor(
+  page: Page,
+  floorOneBased: number
+): Promise<void> {
+  await page.waitForFunction(
+    (f) => {
+      const s = (window as Window & { __gameState?: GameState }).__gameState;
+      return (
+        s != null &&
+        s.floor.current === f &&
+        s.screenState === "running" &&
+        !s.gameWon
+      );
+    },
+    floorOneBased,
+    { timeout: 20000 }
+  );
+}
+
+/** From (0,0): coworker + manager events; ends at ~(8,2) with work +12 this floor. */
+async function originalOfficeTwoEventsFromStart(page: Page): Promise<void> {
   await setTestEnergy(page, 500);
   await pressUntilPlayerAt(page, "ArrowRight", { x: 1, y: 0 });
   await pressUntilPlayerAt(page, "ArrowDown", { x: 1, y: 1 });
@@ -256,86 +276,54 @@ async function completeWorkDayOriginalOffice(page: Page): Promise<void> {
     const s = (window as Window & { __gameState?: GameState }).__gameState;
     return (s?.workDone ?? 0) >= 12;
   }, { timeout: 8000 });
+}
 
-  await setTestEnergy(page, 500);
-
-  await pressUntilPlayerAt(page, "ArrowDown", { x: 8, y: 4 });
-  await pressUntilPlayerAt(page, "ArrowDown", { x: 8, y: 5 });
-  await pressUntilPlayerAt(page, "ArrowDown", { x: 8, y: 6 });
-  await pressUntilPlayerAt(page, "ArrowDown", { x: 8, y: 7 });
-  await pressUntilPlayerAt(page, "ArrowDown", { x: 8, y: 8 });
-  await pressUntilPlayerAt(page, "ArrowLeft", { x: 7, y: 8 });
-  await pressUntilPlayerAt(page, "ArrowLeft", { x: 6, y: 8 });
-  await pressUntilPlayerAt(page, "ArrowLeft", { x: 5, y: 8 });
-  await pressUntilPlayerAt(page, "ArrowLeft", { x: 4, y: 8 });
-  await pressUntilPlayerAt(page, "ArrowUp", { x: 4, y: 7 });
-  await pressUntilPlayerAt(page, "ArrowUp", { x: 4, y: 6 });
-  await pressUntilPlayerAt(page, "ArrowUp", { x: 4, y: 5 });
-  await pressUntilPlayerAt(page, "ArrowUp", { x: 4, y: 4 });
-  await page.waitForFunction(() => {
-    const s = (window as Window & { __gameState?: GameState }).__gameState;
-    return s?.currentEncounterId === "surprise_meeting";
-  }, { timeout: 8000 });
-  await page.keyboard.press("y", { delay: 25 });
-  await page.waitForFunction(() => {
-    const s = (window as Window & { __gameState?: GameState }).__gameState;
-    return (s?.workDone ?? 0) >= 18 && s?.runStats.enemiesDefeated === 1;
-  }, { timeout: 8000 });
-
-  await setTestEnergy(page, 500);
-
-  await pressUntilPlayerAt(page, "ArrowDown", { x: 4, y: 5 });
-  await pressUntilPlayerAt(page, "ArrowLeft", { x: 3, y: 5 });
-  await page.waitForFunction(() => {
-    const s = (window as Window & { __gameState?: GameState }).__gameState;
-    return s?.currentEncounterId === "reply_all_disaster";
-  }, { timeout: 8000 });
-  await page.keyboard.press("y", { delay: 25 });
-  await page.waitForFunction(() => {
-    const s = (window as Window & { __gameState?: GameState }).__gameState;
-    return (s?.workDone ?? 0) >= 24 && s?.runStats.enemiesDefeated === 2;
-  }, { timeout: 8000 });
-
-  await setTestEnergy(page, 500);
-
-  await pressUntilPlayerAt(page, "ArrowDown", { x: 3, y: 6 });
-  await pressUntilPlayerAt(page, "ArrowDown", { x: 3, y: 7 });
-  await pressUntilPlayerAt(page, "ArrowDown", { x: 3, y: 8 });
-  await pressUntilPlayerAt(page, "ArrowDown", { x: 3, y: 9 });
-  await pressUntilPlayerAt(page, "ArrowRight", { x: 4, y: 9 });
-  await pressUntilPlayerAt(page, "ArrowRight", { x: 5, y: 9 });
-  await pressUntilPlayerAt(page, "ArrowRight", { x: 6, y: 9 });
-  await pressUntilPlayerAt(page, "ArrowRight", { x: 7, y: 9 });
-  await pressUntilPlayerAt(page, "ArrowUp", { x: 7, y: 8 });
-  await pressUntilPlayerAt(page, "ArrowUp", { x: 7, y: 7 });
-  await page.waitForFunction(() => {
-    const s = (window as Window & { __gameState?: GameState }).__gameState;
-    return s?.currentEncounterId === "broken_printer";
-  }, { timeout: 8000 });
-  await page.keyboard.press("n", { delay: 25 });
-  await page.waitForFunction(() => {
-    const s = (window as Window & { __gameState?: GameState }).__gameState;
-    return (
-      (s?.workDone ?? 0) >= 30 &&
-      s?.runStats.enemiesDefeated === 3 &&
-      s?.gameWon === false
-    );
-  }, { timeout: 8000 });
-
-  await setTestEnergy(page, 500);
-  for (let x = 6; x >= 1; x--) {
-    await pressUntilPlayerAt(page, "ArrowLeft", { x, y: 7 });
+/**
+ * After manager event (tile (8,3)): south corridor in column 8, then (9,8)→(9,9).
+ * East strip y=1–6 is blocked in Original Office; do not walk x=9 until y≥8.
+ */
+async function walkOriginalOfficeExitFromManagerColumn(page: Page): Promise<void> {
+  for (let y = 4; y <= 8; y++) {
+    await pressUntilPlayerAt(page, "ArrowDown", { x: 8, y });
   }
-  await pressUntilPlayerAt(page, "ArrowUp", { x: 1, y: 6 });
-  await pressUntilPlayerAt(page, "ArrowUp", { x: 1, y: 5 });
+  await pressUntilPlayerAt(page, "ArrowRight", { x: 9, y: 8 });
+  await pressUntilPlayerAt(page, "ArrowDown", { x: 9, y: 9 });
+}
+
+/**
+ * Original Office (`/?eventRandom=0&layout=0`): three floors (pinned layout), two events per floor,
+ * exit each floor with enough cumulative work; win only on final exit (phase 3).
+ */
+async function completeWorkDayOriginalOffice(page: Page): Promise<void> {
+  await originalOfficeTwoEventsFromStart(page);
+  await walkOriginalOfficeExitFromManagerColumn(page);
+  await waitForRunningFloor(page, 2);
+
+  await originalOfficeTwoEventsFromStart(page);
+  await walkOriginalOfficeExitFromManagerColumn(page);
+  await waitForRunningFloor(page, 3);
+
+  await originalOfficeTwoEventsFromStart(page);
+  await walkOriginalOfficeExitFromManagerColumn(page);
 
   await page.waitForFunction(() => {
     const s = (window as Window & { __gameState?: GameState }).__gameState;
     return s?.gameWon === true && (s?.workDone ?? 0) >= s.workTarget;
-  }, { timeout: 8000 });
+  }, { timeout: 45000 });
 }
 
-/** Executive Row (layout 2): resolve reward + all events + enemies for work win. */
+/** After coworker at (2,6), walk to Executive Row exit (7,7) without crossing (5,5). */
+async function walkExecutiveExitFromCoworkerTile(page: Page): Promise<void> {
+  await pressUntilPlayerAt(page, "ArrowRight", { x: 3, y: 6 });
+  for (let x = 4; x <= 7; x++) {
+    await pressUntilPlayerAt(page, "ArrowRight", { x, y: 6 });
+  }
+  await pressUntilPlayerAt(page, "ArrowDown", { x: 7, y: 7 });
+}
+
+/**
+ * Executive Row (`/?eventRandom=0&layout=2`): three pinned floors, exit-based progression (phase 3).
+ */
 async function completeWorkDayExecutiveRow(page: Page): Promise<void> {
   await setTestEnergy(page, 500);
   await pressUntilPlayerAt(page, "ArrowRight", { x: 1, y: 0 });
@@ -353,29 +341,18 @@ async function completeWorkDayExecutiveRow(page: Page): Promise<void> {
     const s = (window as Window & { __gameState?: GameState }).__gameState;
     return (s?.workDone ?? 0) >= 16;
   }, { timeout: 8000 });
+  await walkExecutiveExitFromCoworkerTile(page);
+  await waitForRunningFloor(page, 2);
 
   await setTestEnergy(page, 500);
-
-  await pressUntilPlayerAt(page, "ArrowUp", { x: 2, y: 5 });
-  await pressUntilPlayerAt(page, "ArrowRight", { x: 3, y: 5 });
-  await pressUntilPlayerAt(page, "ArrowRight", { x: 4, y: 5 });
-  await pressUntilPlayerAt(page, "ArrowRight", { x: 5, y: 5 });
-  await page.waitForFunction(() => {
-    const s = (window as Window & { __gameState?: GameState }).__gameState;
-    return s?.screenState === "event";
-  }, { timeout: 8000 });
-  await page.keyboard.press("y", { delay: 25 });
-  await page.waitForFunction(() => {
-    const s = (window as Window & { __gameState?: GameState }).__gameState;
-    return (s?.workDone ?? 0) >= 20;
-  }, { timeout: 8000 });
-
-  await setTestEnergy(page, 500);
-
-  await pressUntilPlayerAt(page, "ArrowRight", { x: 6, y: 5 });
-  await pressUntilPlayerAt(page, "ArrowUp", { x: 6, y: 4 });
-  await pressUntilPlayerAt(page, "ArrowUp", { x: 6, y: 3 });
-  await pressUntilPlayerAt(page, "ArrowUp", { x: 6, y: 2 });
+  await pressUntilPlayerAt(page, "ArrowRight", { x: 1, y: 0 });
+  await pressUntilPlayerAt(page, "ArrowRight", { x: 2, y: 0 });
+  await pressUntilPlayerAt(page, "ArrowRight", { x: 3, y: 0 });
+  await pressUntilPlayerAt(page, "ArrowRight", { x: 4, y: 0 });
+  await pressUntilPlayerAt(page, "ArrowRight", { x: 5, y: 0 });
+  await pressUntilPlayerAt(page, "ArrowRight", { x: 6, y: 0 });
+  await pressUntilPlayerAt(page, "ArrowDown", { x: 6, y: 1 });
+  await pressUntilPlayerAt(page, "ArrowDown", { x: 6, y: 2 });
   await page.waitForFunction(() => {
     const s = (window as Window & { __gameState?: GameState }).__gameState;
     return s?.currentEncounterId === "reply_all_disaster";
@@ -383,13 +360,21 @@ async function completeWorkDayExecutiveRow(page: Page): Promise<void> {
   await page.keyboard.press("y", { delay: 25 });
   await page.waitForFunction(() => {
     const s = (window as Window & { __gameState?: GameState }).__gameState;
-    return (s?.workDone ?? 0) >= 26 && s?.runStats.enemiesDefeated === 1;
+    return (s?.workDone ?? 0) >= 22 && s?.runStats.enemiesDefeated === 1;
   }, { timeout: 8000 });
+  await pressUntilPlayerAt(page, "ArrowRight", { x: 7, y: 2 });
+  for (let y = 3; y <= 7; y++) {
+    await pressUntilPlayerAt(page, "ArrowDown", { x: 7, y });
+  }
+  await waitForRunningFloor(page, 3);
 
   await setTestEnergy(page, 500);
-
-  await pressUntilPlayerAt(page, "ArrowLeft", { x: 5, y: 2 });
-  await pressUntilPlayerAt(page, "ArrowLeft", { x: 4, y: 2 });
+  await pressUntilPlayerAt(page, "ArrowRight", { x: 1, y: 0 });
+  await pressUntilPlayerAt(page, "ArrowRight", { x: 2, y: 0 });
+  await pressUntilPlayerAt(page, "ArrowRight", { x: 3, y: 0 });
+  await pressUntilPlayerAt(page, "ArrowRight", { x: 4, y: 0 });
+  await pressUntilPlayerAt(page, "ArrowDown", { x: 4, y: 1 });
+  await pressUntilPlayerAt(page, "ArrowDown", { x: 4, y: 2 });
   await pressUntilPlayerAt(page, "ArrowDown", { x: 4, y: 3 });
   await pressUntilPlayerAt(page, "ArrowDown", { x: 4, y: 4 });
   await page.waitForFunction(() => {
@@ -399,11 +384,31 @@ async function completeWorkDayExecutiveRow(page: Page): Promise<void> {
   await page.keyboard.press("y", { delay: 25 });
   await page.waitForFunction(() => {
     const s = (window as Window & { __gameState?: GameState }).__gameState;
-    return s?.gameWon === true && (s?.workDone ?? 0) >= s.workTarget;
+    return (s?.workDone ?? 0) >= 28 && s?.runStats.enemiesDefeated === 2;
   }, { timeout: 8000 });
+  await pressUntilPlayerAt(page, "ArrowRight", { x: 5, y: 4 });
+  await pressUntilPlayerAt(page, "ArrowDown", { x: 5, y: 5 });
+  await page.waitForFunction(() => {
+    const s = (window as Window & { __gameState?: GameState }).__gameState;
+    return s?.screenState === "event";
+  }, { timeout: 8000 });
+  await page.keyboard.press("y", { delay: 25 });
+  await page.waitForFunction(() => {
+    const s = (window as Window & { __gameState?: GameState }).__gameState;
+    return (s?.workDone ?? 0) >= 32;
+  }, { timeout: 8000 });
+  await pressUntilPlayerAt(page, "ArrowRight", { x: 6, y: 5 });
+  await pressUntilPlayerAt(page, "ArrowRight", { x: 7, y: 5 });
+  await pressUntilPlayerAt(page, "ArrowDown", { x: 7, y: 6 });
+  await pressUntilPlayerAt(page, "ArrowDown", { x: 7, y: 7 });
+
+  await page.waitForFunction(() => {
+    const s = (window as Window & { __gameState?: GameState }).__gameState;
+    return s?.gameWon === true && (s?.workDone ?? 0) >= s.workTarget;
+  }, { timeout: 45000 });
 }
 
-/** From (0,0) to Endless Meeting at (4,4); avoids reward tile; needs extra energy for move costs. */
+/** From (0,0) to Endless Meeting at (4,4); avoids reward tile. */
 async function walkToFirstEnemyOriginalOffice(page: Page): Promise<void> {
   await setTestEnergy(page, 11);
   await pressUntilPlayerAt(page, "ArrowRight", { x: 1, y: 0 });
@@ -472,14 +477,13 @@ async function setEnergyAndWalkToCoworkerVent(
   return publishedAfterSteps;
 }
 
-const COWORKER_VENT_MOVE_COST = 10;
-
 function expectEnergyAfterCoworkerWalk(
   e: { afterSet: number; afterWalk: number },
   boosted: number
 ): void {
   expect(e.afterSet).toBe(boosted);
-  expect(e.afterWalk).toBe(boosted - COWORKER_VENT_MOVE_COST);
+  // Phase 3: walking does not spend energy; only encounters/events do.
+  expect(e.afterWalk).toBe(boosted);
 }
 
 async function clearMetaStorageAndGotoOD(page: Page): Promise<void> {
@@ -666,7 +670,8 @@ test("smoke: move to enemy tile opens office encounter (window.__gameState)", as
   expect(after!.playerPosition).toEqual({ x: 4, y: 4 });
   const e44 = enemyAt(after, 4, 4);
   expect(e44?.alive).toBe(false);
-  expect(after!.playerEnergy).toBe(2);
+  // Uncapped test energy 11, then encounter −1 → clamped to layout max 8 (Extra Coffee).
+  expect(after!.playerEnergy).toBe(8);
   expect(after!.playerStress).toBe(1);
   expect(after!.runStats).toMatchObject({
     enemiesDefeated: 1,
@@ -675,7 +680,7 @@ test("smoke: move to enemy tile opens office encounter (window.__gameState)", as
   expect(after!.runStats.turnsTaken).toBeGreaterThan(0);
   expect(after!.workDone).toBe(6);
   expect(after?.latestMessage).toMatch(/slipped away|Surprise Meeting/i);
-  await expect(page.locator("#hud-test-mirror")).toContainText(/⚡\s*2\/8/);
+  await expect(page.locator("#hud-test-mirror")).toContainText(/⚡\s*8\/8/);
 });
 
 test("smoke: reward tile collects after encounter and restores energy", async ({
@@ -709,7 +714,7 @@ test("smoke: reward tile collects after encounter and restores energy", async ({
     return (window as Window & { __gameState?: GameState }).__gameState;
   });
   expect(afterCombat!.playerPosition).toEqual({ x: 4, y: 4 });
-  expect(afterCombat!.playerEnergy).toBe(2);
+  expect(afterCombat!.playerEnergy).toBe(8);
   expect(afterCombat!.reward.available).toBe(true);
 
   await setTestEnergy(page, 80);
@@ -773,13 +778,14 @@ test("smoke: work target sets gameWon and disables movement", async ({
   const won = await page.evaluate(() => {
     return (window as Window & { __gameState?: GameState }).__gameState;
   });
-  expect(won!.playerPosition).toEqual({ x: 1, y: 5 });
+  expect(won!.playerPosition).toEqual({ x: 9, y: 9 });
   expect(won!.gameWon).toBe(true);
   expect(won!.workDone).toBeGreaterThanOrEqual(won!.workTarget);
   expect(won!.screenState).toBe("victory");
+  expect(won!.floor.total).toBe(3);
   expect(won!.runStats).toMatchObject({
-    enemiesDefeated: 3,
-    eventsResolved: 3,
+    enemiesDefeated: 0,
+    eventsResolved: 6,
   });
   expect(won!.runStats.turnsTaken).toBeGreaterThan(0);
   expect(won!.meta.creditsEarnedThisRun).toBeGreaterThanOrEqual(2);
@@ -807,7 +813,7 @@ test("smoke: work target sets gameWon and disables movement", async ({
   const afterKey = await page.evaluate(() => {
     return (window as Window & { __gameState?: GameState }).__gameState;
   });
-  expect(afterKey!.playerPosition).toEqual({ x: 1, y: 5 });
+  expect(afterKey!.playerPosition).toEqual({ x: 9, y: 9 });
 });
 
 test("smoke: summary dismiss restarts run after win and movement works again", async ({
@@ -847,8 +853,8 @@ test("smoke: summary dismiss restarts run after win and movement works again", a
   });
   expect(won!.gameWon).toBe(true);
   expect(won!.runStats).toMatchObject({
-    enemiesDefeated: 3,
-    eventsResolved: 3,
+    enemiesDefeated: 0,
+    eventsResolved: 6,
   });
   const creditsAfterWin = won!.meta.officeCredits;
   await expect(page.locator("#summary-test-mirror")).toContainText(
@@ -971,15 +977,16 @@ test("smoke: run summary after game over shows stats and Result Game Over", asyn
   await page.keyboard.press("y", { delay: 25 });
   await page.waitForFunction(() => {
     const s = (window as Window & { __gameState?: GameState }).__gameState;
-    return s?.runStats.enemiesDefeated === 1 && s.playerEnergy === 2;
+    return s?.runStats.enemiesDefeated === 1 && s.playerEnergy === 8;
   }, { timeout: 5000 });
-  await setTestEnergy(page, 9);
   await pressUntilPlayerAt(page, "ArrowDown", { x: 4, y: 5 });
   await pressUntilPlayerAt(page, "ArrowLeft", { x: 3, y: 5 });
   await page.waitForFunction(() => {
     const s = (window as Window & { __gameState?: GameState }).__gameState;
     return s?.currentEncounterId === "reply_all_disaster";
   }, { timeout: 5000 });
+  // Aggressive reply costs 7 energy; movement no longer drains, so set exactly 7 before choice B.
+  await setTestEnergy(page, 7);
   await page.keyboard.press("b", { delay: 25 });
   await page.waitForFunction(() => {
     const s = (window as Window & { __gameState?: GameState }).__gameState;
@@ -1009,7 +1016,7 @@ test("smoke: run summary after game over shows stats and Result Game Over", asyn
   const summaryAfterLoss = await page
     .locator("#summary-test-mirror")
     .textContent();
-  expect(summaryAfterLoss).toMatch(/more credits? to unlock/i);
+  expect(summaryAfterLoss).toMatch(/Next goal:/i);
   await expect(page.locator("#summary-test-mirror")).toContainText(
     /Credits Earned:\s*\+6/
   );
@@ -1159,7 +1166,7 @@ test("meta: office credits saved to localStorage and restored after reload", asy
   await page.waitForFunction(() => {
     const s = (window as Window & { __gameState?: GameState }).__gameState;
     return s?.gameWon === true && (s?.meta.officeCredits ?? 0) >= 2;
-  }, { timeout: 15000 });
+  }, { timeout: 45000 });
 
   const stored = await page.evaluate((key) => {
     const raw = localStorage.getItem(key);
@@ -1193,14 +1200,14 @@ test("meta: unlocked perk and equip state restored after reload", async ({
     await page.waitForFunction(() => {
       const s = (window as Window & { __gameState?: GameState }).__gameState;
       return s?.gameWon === true;
-    }, { timeout: 15000 });
+    }, { timeout: 45000 });
     await returnToTitleAfterVictory(page);
   }
 
   await page.waitForFunction(() => {
     const s = (window as Window & { __gameState?: GameState }).__gameState;
     return s?.screenState === "title" && s.meta.officeCredits >= 5;
-  }, { timeout: 15000 });
+  }, { timeout: 45000 });
 
   const creditsBeforeCalmMind = await page.evaluate(() => {
     return (window as Window & { __gameState?: GameState }).__gameState?.meta
@@ -1248,7 +1255,7 @@ test("meta: C on title clears save and resets progression", async ({ page }) => 
   await page.waitForFunction(() => {
     const s = (window as Window & { __gameState?: GameState }).__gameState;
     return s?.gameWon === true;
-  }, { timeout: 5000 });
+  }, { timeout: 45000 });
 
   await page.evaluate(() => {
     (window as Window & { __odE2e?: OdE2e }).__odE2e?.restartRun();
@@ -1256,7 +1263,7 @@ test("meta: C on title clears save and resets progression", async ({ page }) => 
   await page.waitForFunction(() => {
     const s = (window as Window & { __gameState?: GameState }).__gameState;
     return s?.screenState === "title" && (s.meta.officeCredits ?? 0) >= 2;
-  }, { timeout: 5000 });
+  }, { timeout: 10000 });
 
   await page.evaluate(() => {
     (window as Window & { __odE2e?: OdE2e }).__odE2e?.clearMetaState();
@@ -1290,14 +1297,14 @@ test("meta: unlock Calm Mind with credits, re-equip Extra Coffee via __odE2e", a
     await page.waitForFunction(() => {
       const s = (window as Window & { __gameState?: GameState }).__gameState;
       return s?.gameWon === true;
-    }, { timeout: 10000 });
+    }, { timeout: 45000 });
     await returnToTitleAfterVictory(page);
   }
 
   await page.waitForFunction(() => {
     const s = (window as Window & { __gameState?: GameState }).__gameState;
     return s?.screenState === "title" && s.meta.officeCredits >= 5;
-  }, { timeout: 10000 });
+  }, { timeout: 45000 });
 
   const creditsBeforeSlot2 = await page.evaluate(() => {
     return (window as Window & { __gameState?: GameState }).__gameState?.meta
@@ -1358,14 +1365,14 @@ test("meta: Aggressive Reply — Executive Row encounter energy outcome", async 
     await page.waitForFunction(() => {
       const s = (window as Window & { __gameState?: GameState }).__gameState;
       return s?.gameWon === true;
-    }, { timeout: 15000 });
+    }, { timeout: 45000 });
     await returnToTitleAfterVictory(page);
   }
 
   await page.waitForFunction(() => {
     const s = (window as Window & { __gameState?: GameState }).__gameState;
     return s?.screenState === "title" && s.meta.officeCredits >= 7;
-  }, { timeout: 15000 });
+  }, { timeout: 45000 });
 
   await page.goto("/?eventRandom=0&layout=0");
   await focusGameAndWaitForState(page);
@@ -1417,7 +1424,8 @@ test("meta: Aggressive Reply — Executive Row encounter energy outcome", async 
   });
   expect(enemyAt(afterCombat, 4, 4)?.alive).toBe(false);
   expect(afterCombat?.meta.equippedRelicIds).toEqual(["aggressive_reply"]);
-  expect(afterCombat?.playerEnergy).toBe(4);
+  // Uncapped test energy 14; first IT choice is −2 but clamps to layout max (6) — no movement tax (phase 3).
+  expect(afterCombat?.playerEnergy).toBe(6);
 });
 
 test("touch: title exposes touchUi, mirror, and start without keyboard (__odE2e)", async ({
@@ -1614,13 +1622,13 @@ test("smoke: rewarded continue restores run and allows only one use per run", as
     const s = (window as Window & { __gameState?: GameState }).__gameState;
     return s?.runStats.enemiesDefeated === 1;
   }, { timeout: 5000 });
-  await setTestEnergy(page, 9);
   await pressUntilPlayerAt(page, "ArrowDown", { x: 4, y: 5 });
   await pressUntilPlayerAt(page, "ArrowLeft", { x: 3, y: 5 });
   await page.waitForFunction(() => {
     const s = (window as Window & { __gameState?: GameState }).__gameState;
     return s?.currentEncounterId === "reply_all_disaster";
   }, { timeout: 5000 });
+  await setTestEnergy(page, 7);
   await page.keyboard.press("b", { delay: 25 });
   await page.waitForFunction(() => {
     const s = (window as Window & { __gameState?: GameState }).__gameState;
@@ -1687,13 +1695,13 @@ test("smoke: premium summary shows Continue without Ad label", async ({
     const s = (window as Window & { __gameState?: GameState }).__gameState;
     return s?.runStats.enemiesDefeated === 1;
   }, { timeout: 5000 });
-  await setTestEnergy(page, 9);
   await pressUntilPlayerAt(page, "ArrowDown", { x: 4, y: 5 });
   await pressUntilPlayerAt(page, "ArrowLeft", { x: 3, y: 5 });
   await page.waitForFunction(() => {
     const s = (window as Window & { __gameState?: GameState }).__gameState;
     return s?.currentEncounterId === "reply_all_disaster";
   }, { timeout: 5000 });
+  await setTestEnergy(page, 7);
   await page.keyboard.press("b", { delay: 25 });
   await page.waitForFunction(() => {
     const s = (window as Window & { __gameState?: GameState }).__gameState;
