@@ -276,8 +276,9 @@ export class GameScene extends Phaser.Scene {
   private eventRects: (Phaser.GameObjects.Rectangle | null)[] = [];
   private eventAvailable: boolean[] = [];
   private activeEventIndex: number | null = null;
-  /** Multiline prompt in footer (encounter / choice event). */
-  private footerPromptText: Phaser.GameObjects.Text | null = null;
+  /** Encounter/event title (larger, bold) + body in footer prompt band. */
+  private footerPromptTitleText: Phaser.GameObjects.Text | null = null;
+  private footerPromptBodyText: Phaser.GameObjects.Text | null = null;
   private playerGridX = 0;
   private playerGridY = 0;
   private cursors!: Phaser.Types.Input.Keyboard.CursorKeys;
@@ -421,8 +422,10 @@ export class GameScene extends Phaser.Scene {
   }
 
   private clearFooterPrompt(): void {
-    this.footerPromptText?.destroy();
-    this.footerPromptText = null;
+    this.footerPromptTitleText?.destroy();
+    this.footerPromptBodyText?.destroy();
+    this.footerPromptTitleText = null;
+    this.footerPromptBodyText = null;
   }
 
   /**
@@ -432,21 +435,39 @@ export class GameScene extends Phaser.Scene {
   private showFooterPrompt(title: string, body: string): void {
     this.clearFooterPrompt();
     const wrapW = Math.max(100, this.scale.width - 2 * TOUCH_EDGE_INSET);
-    const lines = [title, "", body].join("\n");
-    this.footerPromptText = this.add.text(
+    const ft = this.footerTopY();
+    const titlePx = this.isCompactViewport() ? "14px" : "15px";
+    const bodyPx = this.isCompactViewport() ? "10px" : "11px";
+    this.footerPromptTitleText = this.add.text(
       TOUCH_EDGE_INSET,
-      this.footerTopY() + 2,
-      lines,
+      ft + 4,
+      title,
       uiTextStyle({
-        fontSize: this.isCompactViewport() ? "10px" : "11px",
-        color: "#d8d8ee",
+        fontSize: titlePx,
+        color: "#f0f0ff",
+        fontStyle: "bold",
         wordWrap: { width: wrapW },
         lineSpacing: 2,
       })
     );
-    this.footerPromptText.setOrigin(0, 0);
-    this.footerPromptText.setScrollFactor(0, 0);
-    this.footerPromptText.setDepth(FOOTER_PROMPT_DEPTH);
+    this.footerPromptTitleText.setOrigin(0, 0);
+    this.footerPromptTitleText.setScrollFactor(0, 0);
+    this.footerPromptTitleText.setDepth(FOOTER_PROMPT_DEPTH);
+    const titleH = this.footerPromptTitleText.getBounds().height;
+    this.footerPromptBodyText = this.add.text(
+      TOUCH_EDGE_INSET,
+      ft + 4 + titleH + 6,
+      body,
+      uiTextStyle({
+        fontSize: bodyPx,
+        color: "#d8d8ee",
+        wordWrap: { width: wrapW },
+        lineSpacing: 3,
+      })
+    );
+    this.footerPromptBodyText.setOrigin(0, 0);
+    this.footerPromptBodyText.setScrollFactor(0, 0);
+    this.footerPromptBodyText.setDepth(FOOTER_PROMPT_DEPTH);
   }
 
   /** Semi-opaque bar behind compact HUD text. */
@@ -536,21 +557,37 @@ export class GameScene extends Phaser.Scene {
     const yLast = rowTop - FOOTER_ABOVE_CHOICE_GAP_PX - FOOTER_LAST_LINE_PX;
     const yPhase = yLast - FOOTER_PHASE_LINE_PX;
 
-    if (this.footerPromptText) {
+    if (this.footerPromptTitleText && this.footerPromptBodyText) {
       const wrapW = Math.max(100, this.scale.width - 2 * TOUCH_EDGE_INSET);
-      this.footerPromptText.setPosition(TOUCH_EDGE_INSET, ft + 4);
       const maxBottom = yPhase - 6;
-      let fp = this.isCompactViewport() ? 10 : 11;
-      for (; fp >= 8; fp--) {
-        this.footerPromptText.setStyle(
+      const titleInset = ft + 4;
+      let bodyPx = this.isCompactViewport() ? 10 : 11;
+      for (; bodyPx >= 8; bodyPx--) {
+        const titlePx = Math.min(bodyPx + 4, 18);
+        this.footerPromptTitleText.setStyle(
           uiTextStyle({
-            fontSize: `${fp}px`,
-            color: "#d8d8ee",
+            fontSize: `${titlePx}px`,
+            color: "#f0f0ff",
+            fontStyle: "bold",
             wordWrap: { width: wrapW },
             lineSpacing: 2,
           })
         );
-        if (this.footerPromptText.getBounds().bottom <= maxBottom) break;
+        this.footerPromptBodyText.setStyle(
+          uiTextStyle({
+            fontSize: `${bodyPx}px`,
+            color: "#d8d8ee",
+            wordWrap: { width: wrapW },
+            lineSpacing: 3,
+          })
+        );
+        this.footerPromptTitleText.setPosition(TOUCH_EDGE_INSET, titleInset);
+        const titleH = this.footerPromptTitleText.getBounds().height;
+        this.footerPromptBodyText.setPosition(
+          TOUCH_EDGE_INSET,
+          titleInset + titleH + 6
+        );
+        if (this.footerPromptBodyText.getBounds().bottom <= maxBottom) break;
       }
     }
 
@@ -1511,11 +1548,16 @@ export class GameScene extends Phaser.Scene {
       Math.max(1, Math.floor((usableW - evGap * 2) / 3))
     );
     const evW = threeChoiceEncounter ? evW3 : evW2;
-    const leftCx = TOUCH_EDGE_INSET + evW / 2;
-    const midCx = TOUCH_EDGE_INSET + evW + evGap + evW / 2;
-    const rightCx = TOUCH_EDGE_INSET + (evW + evGap) * 2 + evW / 2;
-    const twoLeftCx = TOUCH_EDGE_INSET + evW2 / 2;
-    const twoMidCx = TOUCH_EDGE_INSET + evW2 + evGap + evW2 / 2;
+    /** Center the choice row as a group (was inset from the left). */
+    const groupW2 = evW2 * 2 + evGap;
+    const gl2 = (w - groupW2) / 2;
+    const twoLeftCx = gl2 + evW2 / 2;
+    const twoMidCx = gl2 + evW2 + evGap + evW2 / 2;
+    const groupW3 = evW3 * 3 + evGap * 2;
+    const gl3 = (w - groupW3) / 2;
+    const leftCx = gl3 + evW3 / 2;
+    const midCx = gl3 + evW3 + evGap + evW3 / 2;
+    const rightCx = gl3 + (evW3 + evGap) * 2 + evW3 / 2;
 
     if (flags.event && this.activeEventIndex !== null) {
       const idx = this.activeEventIndex;
@@ -2775,6 +2817,7 @@ export class GameScene extends Phaser.Scene {
 
     console.log("Encounter opened");
     this.syncTouchLayer();
+    this.layoutFooterMessages();
     return true;
   }
 
